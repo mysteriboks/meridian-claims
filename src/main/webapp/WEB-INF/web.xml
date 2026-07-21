@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://xmlns.jcp.org/xml/ns/javaee
+             http://xmlns.jcp.org/xml/ns/javaee/web-app_3_1.xsd"
+         version="3.1">
+
+    <display-name>Meridian Claims</display-name>
+
+    <!-- ===== Root application context (services, DAOs, datasource) ===== -->
+    <context-param>
+        <param-name>contextConfigLocation</param-name>
+        <param-value>/WEB-INF/applicationContext.xml</param-value>
+    </context-param>
+
+    <!-- Sets session-cookie Secure=true under prod profile.
+         Must run BEFORE ContextLoaderListener so the cookie config is locked
+         before the first session is created. -->
+    <listener>
+        <listener-class>com.meridian.claims.web.ProdSecureCookieListener</listener-class>
+    </listener>
+
+    <listener>
+        <listener-class>org.springframework.web.context.ContextLoaderListener</listener-class>
+    </listener>
+
+    <!-- Closes the user_sessions row when a session ends (incl. idle timeout) -->
+    <listener>
+        <listener-class>com.meridian.claims.web.SessionCleanupListener</listener-class>
+    </listener>
+
+    <!-- ===== Spring MVC DispatcherServlet (web context) ===== -->
+    <servlet>
+        <servlet-name>dispatcher</servlet-name>
+        <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
+        <init-param>
+            <param-name>contextConfigLocation</param-name>
+            <param-value>/WEB-INF/servlet-context.xml</param-value>
+        </init-param>
+        <load-on-startup>1</load-on-startup>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>dispatcher</servlet-name>
+        <url-pattern>/</url-pattern>
+    </servlet-mapping>
+
+    <!-- Filter order (determined by <filter-mapping> order below):
+         1. httpsFilter        — prod-only: redirect HTTP→HTTPS, emit HSTS; dev no-op
+         2. securityHeaders    — MED-6: X-Frame-Options, X-Content-Type-Options, CSP, Referrer-Policy
+         3. encodingFilter     — UTF-8 before anything reads request params
+         4. loggingFilter      — per-request method/path/user/time logging
+         5. csrfFilter         — validate CSRF token on every POST
+         6. securityFilter     — redirect unauthenticated requests to /login
+         7. roleFilter         — 403 on insufficient role -->
+
+    <!-- HTTPS enforcement (prod-gated; inert in dev) -->
+    <filter>
+        <filter-name>httpsFilter</filter-name>
+        <filter-class>com.meridian.claims.web.HttpsEnforcementFilter</filter-class>
+    </filter>
+    <filter-mapping>
+        <filter-name>httpsFilter</filter-name>
+        <url-pattern>/*</url-pattern>
+    </filter-mapping>
+
+    <!-- MED-6: Security response headers on all responses including errors -->
+    <filter>
+        <filter-name>securityHeadersFilter</filter-name>
+        <filter-class>com.meridian.claims.web.SecurityHeadersFilter</filter-class>
+    </filter>
+    <filter-mapping>
+        <filter-name>securityHeadersFilter</filter-name>
+        <url-pattern>/*</url-pattern>
+        <dispatcher>REQUEST</dispatcher>
+        <dispatcher>ERROR</dispatcher>
+    </filter-mapping>
+
+    <!-- Force UTF-8 on request bodies -->
+    <filter>
+        <filter-name>encodingFilter</filter-name>
+        <filter-class>org.springframework.web.filter.CharacterEncodingFilter</filter-class>
+        <init-param>
+            <param-name>encoding</param-name>
+            <param-value>UTF-8</param-value>
+        </init-param>
+        <init-param>
+            <param-name>forceEncoding</param-name>
+            <param-value>true</param-value>
+        </init-param>
+    </filter>
+    <filter-mapping>
+        <filter-name>encodingFilter</filter-name>
+        <url-pattern>/*</url-pattern>
+    </filter-mapping>
+
+    <!-- Per-request logging: method, path, resolved user, response time -->
+    <filter>
+        <filter-name>loggingFilter</filter-name>
+        <filter-class>com.meridian.claims.web.LoggingFilter</filter-class>
+    </filter>
+    <filter-mapping>
+        <filter-name>loggingFilter</filter-name>
+        <url-pattern>/*</url-pattern>
+    </filter-mapping>
+
+    <!-- CSRF: validate token on every POST; 403 on mismatch -->
+    <filter>
+        <filter-name>csrfFilter</filter-name>
+        <filter-class>com.meridian.claims.web.CsrfFilter</filter-class>
+    </filter>
+    <filter-mapping>
+        <filter-name>csrfFilter</filter-name>
+        <url-pattern>/*</url-pattern>
+    </filter-mapping>
+
+    <!-- Security: redirect unauthenticated requests to /login -->
+    <filter>
+        <filter-name>securityFilter</filter-name>
+        <filter-class>com.meridian.claims.web.SecurityFilter</filter-class>
+    </filter>
+    <filter-mapping>
+        <filter-name>securityFilter</filter-name>
+        <url-pattern>/*</url-pattern>
+    </filter-mapping>
+
+    <!-- RBAC: 403 on insufficient role -->
+    <filter>
+        <filter-name>roleFilter</filter-name>
+        <filter-class>com.meridian.claims.web.RoleFilter</filter-class>
+    </filter>
+    <filter-mapping>
+        <filter-name>roleFilter</filter-name>
+        <url-pattern>/*</url-pattern>
+    </filter-mapping>
+
+    <!-- 30-minute idle session timeout.
+         Cookie hardening: HttpOnly here; SameSite=Strict in META-INF/context.xml.
+         Secure: Tomcat sets it automatically for HTTPS requests (production sits
+         behind TLS). To HARD-REQUIRE Secure even in config, uncomment <secure>
+         below — but then the session cookie is dropped over plain HTTP, so local
+         http://localhost testing will fail. Leave it commented for local dev. -->
+    <session-config>
+        <session-timeout>30</session-timeout>
+        <cookie-config>
+            <http-only>true</http-only>
+            <!-- <secure>true</secure> -->
+        </cookie-config>
+        <tracking-mode>COOKIE</tracking-mode>
+    </session-config>
+
+    <error-page>
+        <error-code>400</error-code>
+        <location>/WEB-INF/views/error/400.jsp</location>
+    </error-page>
+    <error-page>
+        <error-code>403</error-code>
+        <location>/WEB-INF/views/error/403.jsp</location>
+    </error-page>
+    <error-page>
+        <error-code>404</error-code>
+        <location>/WEB-INF/views/error/404.jsp</location>
+    </error-page>
+    <error-page>
+        <error-code>500</error-code>
+        <location>/WEB-INF/views/error/500.jsp</location>
+    </error-page>
+    <error-page>
+        <exception-type>java.lang.Throwable</exception-type>
+        <location>/WEB-INF/views/error/500.jsp</location>
+    </error-page>
+
+</web-app>

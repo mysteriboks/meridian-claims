@@ -1,0 +1,26 @@
+# Maven build output
+target/
+
+# IDE
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# Internal design docs — tracked locally in .internal-git, never on the remote
+CLAUDE.md
+HIGH_LEVEL_DESIGN.md
+PHASES.md
+PROGRESS.md
+
+# Local-only git repo holding the internal design docs above
+.internal-git/
+
+.claude/worktrees/

@@ -1,0 +1,9 @@
+SLA Breach Alert — Meridian Claims
+
+Claim:       {claimNumber}
+Status:      {status}
+Expected by: {expectedBy}
+Detected at: {detectedAt}
+
+This claim has exceeded its SLA threshold in status {status}.
+Please review and take action in the Meridian Claims worklist.

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tomcat per-application context for Meridian Claims.
+
+  Session cookie hardening (Phase 2). Servlet 3.1 <cookie-config> in web.xml
+  cannot express SameSite, so it is set here via Tomcat's RFC 6265 cookie
+  processor. HttpOnly is also asserted here (in addition to web.xml) so the
+  flag holds regardless of which config wins.
+
+  Secure flag: Tomcat emits Secure on the session cookie automatically for any
+  request received over HTTPS (request.isSecure() == true). In production this
+  app sits behind TLS (direct connector or a terminating proxy), so the cookie
+  is Secure there with no further config. For local plain-HTTP testing we must
+  NOT force Secure, or the browser drops the cookie and login loops. The
+  web.xml <secure> toggle (commented, with instructions) is the explicit
+  override if you ever want to hard-require it.
+-->
+<Context>
+    <CookieProcessor
+        className="org.apache.tomcat.util.http.Rfc6265CookieProcessor"
+        sameSiteCookies="strict"/>
+</Context>

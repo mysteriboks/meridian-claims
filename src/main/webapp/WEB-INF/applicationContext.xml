@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:context="http://www.springframework.org/schema/context"
+       xmlns:tx="http://www.springframework.org/schema/tx"
+       xsi:schemaLocation="
+           http://www.springframework.org/schema/beans
+           http://www.springframework.org/schema/beans/spring-beans.xsd
+           http://www.springframework.org/schema/context
+           http://www.springframework.org/schema/context/spring-context.xsd
+           http://www.springframework.org/schema/tx
+           http://www.springframework.org/schema/tx/spring-tx.xsd">
+
+    <!--
+      Root application context for Meridian Claims.
+      Holds the datasource, transaction manager, JdbcTemplate, and service/DAO
+      beans. The web (controller) beans live in servlet-context.xml.
+    -->
+
+    <!--
+      Property resolution order (later files override earlier keys):
+        1. db.properties          — JDBC / pool defaults (dev literals)
+        2. application.properties — app config defaults
+        3. file:${catalina.base}/conf/meridian-claims-prod.properties — prod overrides
+             (env-var creds, larger pool, mail on). This is an EXTERNAL file that exists
+             only on production hosts — it is NOT packaged in the WAR, so production
+             credentials never sit on the classpath. In dev the file is absent and
+             ignore-resource-not-found="true" silently skips it, so dev boots from the
+             literal db.properties values on http://localhost:8090.
+             See docs/meridian-claims-prod.properties.sample for the template.
+    -->
+    <context:property-placeholder
+        location="classpath:db.properties,classpath:application.properties,file:${catalina.base}/conf/meridian-claims-prod.properties"
+        ignore-resource-not-found="true"/>
+
+    <!-- Component scan for services, DAOs, and helpers (NOT controllers — those
+         are scanned by the DispatcherServlet context). -->
+    <context:component-scan base-package="com.meridian.claims">
+        <context:exclude-filter type="annotation"
+                                 expression="org.springframework.stereotype.Controller"/>
+    </context:component-scan>
+
+    <!-- Apache DBCP2 connection pool -->
+    <bean id="dataSource" class="org.apache.commons.dbcp2.BasicDataSource"
+          destroy-method="close">
+        <property name="driverClassName" value="${jdbc.driverClassName}"/>
+        <property name="url" value="${jdbc.url}"/>
+        <property name="username" value="${jdbc.username}"/>
+        <property name="password" value="${jdbc.password}"/>
+        <property name="initialSize" value="${jdbc.pool.initialSize}"/>
+        <property name="maxTotal" value="${jdbc.pool.maxTotal}"/>
+        <property name="maxIdle" value="${jdbc.pool.maxIdle}"/>
+        <property name="minIdle" value="${jdbc.pool.minIdle}"/>
+        <property name="maxWaitMillis" value="${jdbc.pool.maxWaitMillis}"/>
+        <property name="validationQuery" value="${jdbc.pool.validationQuery}"/>
+        <property name="testOnBorrow" value="${jdbc.pool.testOnBorrow}"/>
+        <property name="testWhileIdle" value="${jdbc.pool.testWhileIdle}"/>
+        <property name="timeBetweenEvictionRunsMillis" value="${jdbc.pool.timeBetweenEvictionRunsMillis}"/>
+        <property name="removeAbandonedOnBorrow" value="${jdbc.pool.removeAbandonedOnBorrow}"/>
+        <property name="removeAbandonedTimeout" value="${jdbc.pool.removeAbandonedTimeout}"/>
+        <property name="logAbandoned" value="${jdbc.pool.logAbandoned}"/>
+    </bean>
+
+    <!-- Shared JdbcTemplate injected into BaseDAO -->
+    <bean id="jdbcTemplate" class="org.springframework.jdbc.core.JdbcTemplate">
+        <constructor-arg ref="dataSource"/>
+    </bean>
+
+    <!-- Transaction manager + annotation-driven @Transactional support -->
+    <bean id="transactionManager"
+          class="org.springframework.jdbc.datasource.DataSourceTransactionManager">
+        <property name="dataSource" ref="dataSource"/>
+    </bean>
+    <tx:annotation-driven transaction-manager="transactionManager"/>
+
+    <!-- Active deployment profile (dev | prod).  Resolved from JVM system property
+         -Dclaims.profile or env var CLAIMS_PROFILE; default is dev. -->
+    <bean id="appProfile" class="com.meridian.claims.util.AppProfile"/>
+
+    <!-- Fail-fast startup: log profile banner, assert prod env vars, run Flyway,
+         verify DB connectivity.  If any step fails, context startup aborts. -->
+    <bean id="startupValidator" class="com.meridian.claims.util.StartupValidator">
+        <constructor-arg ref="dataSource"/>
+        <property name="appProfile" ref="appProfile"/>
+    </bean>
+
+    <!-- ===================================================================
+         Mail (dev-safe by default: claims.mail.enabled=false logs instead)
+         Set claims.mail.enabled=true and configure SMTP props for prod.
+         =================================================================== -->
+    <bean id="mailSender" class="org.springframework.mail.javamail.JavaMailSenderImpl">
+        <property name="host"     value="${claims.mail.smtp.host:localhost}"/>
+        <property name="port"     value="${claims.mail.smtp.port:25}"/>
+        <property name="username" value="${claims.mail.smtp.username:}"/>
+        <property name="password" value="${claims.mail.smtp.password:}"/>
+    </bean>
+
+    <bean id="loggingMailService" class="com.meridian.claims.service.LoggingMailService">
+        <property name="javaMailSender" ref="mailSender"/>
+    </bean>
+
+    <!-- ===================================================================
+         Quartz: hourly SLA escalation job
+         AutowiringSpringBeanJobFactory injects @Autowired/@Value fields into
+         each job instance (the stock SpringBeanJobFactory does not).
+         =================================================================== -->
+    <bean id="quartzJobFactory" class="com.meridian.claims.job.AutowiringSpringBeanJobFactory"/>
+
+    <bean id="slaEscalationJobDetail"
+          class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+        <property name="jobClass" value="com.meridian.claims.job.SlaEscalationJob"/>
+        <property name="durability" value="true"/>
+    </bean>
+
+    <bean id="slaEscalationTrigger"
+          class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+        <property name="jobDetail" ref="slaEscalationJobDetail"/>
+        <!-- Every hour at :00 -->
+        <property name="cronExpression" value="${claims.sla.escalation.cron:0 0 * * * ?}"/>
+    </bean>
+
+    <bean id="staleClaimJobDetail"
+          class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+        <property name="jobClass" value="com.meridian.claims.job.StaleClaimJob"/>
+        <property name="durability" value="true"/>
+    </bean>
+
+    <bean id="staleClaimTrigger"
+          class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+        <property name="jobDetail" ref="staleClaimJobDetail"/>
+        <property name="cronExpression" value="${claims.jobs.stale.cron:0 0 2 * * ?}"/>
+    </bean>
+
+    <bean id="benefitYearRolloverJobDetail"
+          class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+        <property name="jobClass" value="com.meridian.claims.job.BenefitYearRolloverJob"/>
+        <property name="durability" value="true"/>
+    </bean>
+
+    <bean id="benefitYearRolloverTrigger"
+          class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+        <property name="jobDetail" ref="benefitYearRolloverJobDetail"/>
+        <property name="cronExpression" value="${claims.jobs.rollover.cron:0 0 3 * * ?}"/>
+    </bean>
+
+    <bean id="appealSlaEscalationJobDetail"
+          class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+        <property name="jobClass" value="com.meridian.claims.job.AppealSlaEscalationJob"/>
+        <property name="durability" value="true"/>
+    </bean>
+
+    <bean id="appealSlaEscalationTrigger"
+          class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+        <property name="jobDetail" ref="appealSlaEscalationJobDetail"/>
+        <property name="cronExpression" value="${claims.jobs.appeal.sla.cron:0 30 * * * ?}"/>
+    </bean>
+
+    <bean id="slowQueryReportJobDetail"
+          class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+        <property name="jobClass" value="com.meridian.claims.job.SlowQueryReportJob"/>
+        <property name="durability" value="true"/>
+    </bean>
+
+    <bean id="slowQueryReportTrigger"
+          class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+        <property name="jobDetail" ref="slowQueryReportJobDetail"/>
+        <property name="cronExpression" value="${claims.jobs.slowquery.cron:0 0 4 * * ?}"/>
+    </bean>
+
+    <bean id="claimArchiveJobDetail"
+          class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+        <property name="jobClass" value="com.meridian.claims.job.ClaimArchiveJob"/>
+        <property name="durability" value="true"/>
+    </bean>
+
+    <bean id="claimArchiveTrigger"
+          class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+        <property name="jobDetail" ref="claimArchiveJobDetail"/>
+        <property name="cronExpression" value="${claims.jobs.archive.cron:0 0 1 * * ?}"/>
+    </bean>
+
+    <!-- Phase 9 — Inbound claim file poller (FHIR R4 JSON batch intake) -->
+    <bean id="inboundClaimFilePollerJobDetail"
+          class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+        <property name="jobClass" value="com.meridian.claims.job.InboundClaimFilePollerJob"/>
+        <property name="durability" value="true"/>
+    </bean>
+
+    <bean id="inboundClaimFilePollerTrigger"
+          class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+        <property name="jobDetail" ref="inboundClaimFilePollerJobDetail"/>
+        <!-- Default: every 5 minutes. Override via claims.jobs.intake.cron. -->
+        <property name="cronExpression" value="${claims.jobs.intake.cron:0 0/5 * * * ?}"/>
+    </bean>
+
+    <bean id="schedulerFactory"
+          class="org.springframework.scheduling.quartz.SchedulerFactoryBean">
+        <property name="triggers">
+            <list>
+                <ref bean="slaEscalationTrigger"/>
+                <ref bean="staleClaimTrigger"/>
+                <ref bean="benefitYearRolloverTrigger"/>
+                <ref bean="appealSlaEscalationTrigger"/>
+                <ref bean="slowQueryReportTrigger"/>
+                <ref bean="claimArchiveTrigger"/>
+                <ref bean="inboundClaimFilePollerTrigger"/>
+            </list>
+        </property>
+        <property name="jobFactory" ref="quartzJobFactory"/>
+        <property name="waitForJobsToCompleteOnShutdown" value="true"/>
+    </bean>
+
+</beans>

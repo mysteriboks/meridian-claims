@@ -1,0 +1,75 @@
+# Meridian Claims — production property overrides (SAMPLE / TEMPLATE)
+#
+# DEPLOYMENT: copy this file to  $CATALINA_BASE/conf/meridian-claims-prod.properties
+# on each production host and fill in real values. It is loaded by
+# applicationContext.xml via file:${catalina.base}/conf/meridian-claims-prod.properties
+# and overrides the corresponding keys in application.properties / db.properties.
+#
+# This file is NEVER packaged in the WAR — production credentials stay off the
+# classpath. In dev the file is absent and startup falls back to the literal
+# db.properties values, keeping http://localhost:8090 runnable with no setup.
+#
+# Activate the prod profile separately with -Dclaims.profile=prod (or CLAIMS_PROFILE=prod);
+# StartupValidator then asserts the DB env vars below are present and aborts boot if not.
+
+# ---- Mail (enabled in prod) ----
+claims.mail.enabled=true
+claims.mail.from=noreply@yourdomain.com
+# Set the SMTP host/port for the production relay:
+claims.mail.smtp.host=smtp.yourdomain.com
+claims.mail.smtp.port=587
+# If the relay requires authentication (e.g. port 587 with STARTTLS):
+claims.mail.smtp.username=your-smtp-user@yourdomain.com
+claims.mail.smtp.password=<smtp-password>
+
+# ---- Alert email addresses ----
+# These receive automated alerts; the dev defaults (*.meridian.local) will not
+# deliver in production. Set them to real monitored addresses.
+claims.escalation.supervisor.email=supervisor@yourdomain.com
+claims.dba.email=dba@yourdomain.com
+
+# ---- Security policy (optional — defaults are sensible; override to match your standard) ----
+# claims.security.lockout.max-attempts=5
+# claims.security.lockout.minutes=30
+# claims.security.password.expiry-days=90
+# claims.security.password.min-length=8
+# Higher bcrypt-rounds = stronger but slower hashing; raise on capable prod hardware:
+# claims.security.password.bcrypt-rounds=12
+
+# ---- Batch claim intake (activate to enable the inbound file poller) ----
+# Supports FHIR R4 JSON (.json) and X12 EDI 837 (.edi/.x12/.837).
+# Uncomment and set paths to activate. Intake is inert by default (enabled=false).
+# claims.intake.enabled=true
+# claims.intake.path=/data/meridian/claims/inbound
+# claims.intake.archive.path=/data/meridian/claims/archive
+# claims.intake.rejected.path=/data/meridian/claims/rejected
+# claims.jobs.intake.cron=0 0/5 * * * ?
+# EDI file extensions routed to the X12 837 parser (comma-separated, case-insensitive):
+# claims.intake.edi.extensions=edi,x12,837
+
+# ---- Outbound EDI 835 remittance ----
+# If set, generated 835 files are also written to this directory as remittance-{id}.835.
+# Leave blank (the default) for download-only mode (no file written to disk).
+# claims.remittance.edi.output.path=/data/meridian/claims/remittance-out
+# ISA15 usage indicator: false=T (test), true=P (production). Set to true so live
+# clearinghouses receive production-flagged 835 files.
+claims.remittance.edi.production=true
+
+# ---- DBCP2 pool sizing (prod: larger pool) ----
+jdbc.pool.initialSize=10
+jdbc.pool.maxTotal=50
+jdbc.pool.maxIdle=20
+jdbc.pool.minIdle=10
+jdbc.pool.maxWaitMillis=15000
+
+# ---- Pool resilience (prod: longer abandoned timeout for long-running transactions) ----
+jdbc.pool.removeAbandonedTimeout=300
+
+# ---- DB connection (prod database) ----
+jdbc.url=jdbc:postgresql://db.meridian.local:5432/meridian_claims
+
+# ---- DB credentials (resolved from environment variables) ----
+# MERIDIAN_DB_USER and MERIDIAN_DB_PASSWORD must be set in the OS environment of
+# the Tomcat process. StartupValidator aborts startup with a clear message if absent.
+jdbc.username=${MERIDIAN_DB_USER}
+jdbc.password=${MERIDIAN_DB_PASSWORD}
