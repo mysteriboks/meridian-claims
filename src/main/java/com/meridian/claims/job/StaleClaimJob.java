@@ -1,12 +1,10 @@
 package com.meridian.claims.job;
 
-import com.meridian.claims.dao.ClaimAuditDAO;
 import com.meridian.claims.dao.ClaimDAO;
 import com.meridian.claims.dao.InfoRequestDAO;
 import com.meridian.claims.model.Claim;
-import com.meridian.claims.model.ClaimAuditEntry;
-import com.meridian.claims.model.ClaimStatus;
 import com.meridian.claims.model.InfoRequest;
+import com.meridian.claims.service.ClaimService;
 import com.meridian.claims.service.ScheduledJobLogService;
 import com.meridian.claims.util.Page;
 import org.apache.log4j.Logger;
@@ -28,7 +26,7 @@ public class StaleClaimJob implements Job {
 
     @Autowired private ClaimDAO claimDAO;
     @Autowired private InfoRequestDAO infoRequestDAO;
-    @Autowired private ClaimAuditDAO claimAuditDAO;
+    @Autowired private ClaimService claimService;
     @Autowired private ScheduledJobLogService jobLogService;
 
     @Override
@@ -56,16 +54,10 @@ public class StaleClaimJob implements Job {
                 page++;
             }
 
-            // Pass 2: update the collected claims.
+            // Pass 2: abandon the collected claims. Delegates to the service so the accumulator
+            // reversal, status transition and audit happen atomically in one transaction per claim.
             for (Claim claim : due) {
-                claimDAO.updateStatus(claim.getId(), ClaimStatus.ABANDONED.name(), claim.getVersion());
-                ClaimAuditEntry audit = new ClaimAuditEntry();
-                audit.setClaimId(claim.getId());
-                audit.setEventType("ABANDONED");
-                audit.setOldStatus("PENDING_INFO");
-                audit.setNewStatus("ABANDONED");
-                audit.setNotes("Stale: PENDING_INFO past info_request due_date");
-                claimAuditDAO.insert(audit);
+                claimService.markAbandoned(claim.getId(), "Stale: PENDING_INFO past info_request due_date");
                 count++;
             }
             jobLogService.complete(logId, count);

@@ -12,6 +12,7 @@ import com.meridian.claims.dao.MemberCoverageDAO;
 import com.meridian.claims.dao.MemberDAO;
 import com.meridian.claims.dao.PlanDAO;
 import com.meridian.claims.dao.ProviderDAO;
+import com.meridian.claims.model.AdjudicationResult;
 import com.meridian.claims.model.Claim;
 import com.meridian.claims.model.ClaimAccumulatorContribution;
 import com.meridian.claims.model.ClaimAuditEntry;
@@ -25,6 +26,8 @@ import com.meridian.claims.model.Member;
 import com.meridian.claims.model.MemberCoverage;
 import com.meridian.claims.model.Plan;
 import com.meridian.claims.model.Provider;
+import com.meridian.claims.model.User;
+import com.meridian.claims.model.UserRole;
 import com.meridian.claims.controller.SubmitClaimRequest;
 import com.meridian.claims.util.ClaimNumberGenerator;
 import com.meridian.claims.util.Page;
@@ -33,10 +36,14 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Service
 public class ClaimService {
@@ -44,20 +51,24 @@ public class ClaimService {
     // Legal state-machine transitions: from → set of allowed tos.
     // Authoritative source: PHASES.md → "Claim Status State Machine". This map must match
     // that table exactly (CLAUDE.md: code and docs must never disagree).
-    private static final Map<String, String[]> LEGAL_TRANSITIONS = new HashMap<String, String[]>();
+    private static final Map<String, Set<String>> LEGAL_TRANSITIONS = new HashMap<String, Set<String>>();
     static {
-        LEGAL_TRANSITIONS.put("SUBMITTED",       new String[]{"DENIED", "APPROVED", "IN_REVIEW"});
-        LEGAL_TRANSITIONS.put("IN_REVIEW",        new String[]{"APPROVED", "DENIED", "PENDING_INFO"});
-        LEGAL_TRANSITIONS.put("PENDING_INFO",     new String[]{"IN_REVIEW", "ABANDONED"});
-        LEGAL_TRANSITIONS.put("DENIED",           new String[]{"IN_REVIEW"});
-        LEGAL_TRANSITIONS.put("APPROVED",         new String[]{"PENDING_PAYMENT"});
-        LEGAL_TRANSITIONS.put("PENDING_PAYMENT",  new String[]{"IN_BATCH"});
-        LEGAL_TRANSITIONS.put("IN_BATCH",         new String[]{"PAID", "PENDING_PAYMENT"});
-        LEGAL_TRANSITIONS.put("PAID",             new String[]{"VOIDED", "REPLACED"});
+        LEGAL_TRANSITIONS.put("SUBMITTED",       setOf("DENIED", "APPROVED", "IN_REVIEW"));
+        LEGAL_TRANSITIONS.put("IN_REVIEW",        setOf("APPROVED", "DENIED", "PENDING_INFO"));
+        LEGAL_TRANSITIONS.put("PENDING_INFO",     setOf("IN_REVIEW", "ABANDONED"));
+        LEGAL_TRANSITIONS.put("DENIED",           setOf("IN_REVIEW"));
+        LEGAL_TRANSITIONS.put("APPROVED",         setOf("PENDING_PAYMENT"));
+        LEGAL_TRANSITIONS.put("PENDING_PAYMENT",  setOf("IN_BATCH"));
+        LEGAL_TRANSITIONS.put("IN_BATCH",         setOf("PAID", "PENDING_PAYMENT"));
+        LEGAL_TRANSITIONS.put("PAID",             setOf("VOIDED", "REPLACED"));
         // Terminal states — no outbound transitions
-        LEGAL_TRANSITIONS.put("VOIDED",           new String[]{});
-        LEGAL_TRANSITIONS.put("REPLACED",         new String[]{});
-        LEGAL_TRANSITIONS.put("ABANDONED",        new String[]{});
+        LEGAL_TRANSITIONS.put("VOIDED",           Collections.<String>emptySet());
+        LEGAL_TRANSITIONS.put("REPLACED",         Collections.<String>emptySet());
+        LEGAL_TRANSITIONS.put("ABANDONED",        Collections.<String>emptySet());
+    }
+
+    private static Set<String> setOf(String... values) {
+        return new HashSet<String>(Arrays.asList(values));
     }
 
     @Autowired private ClaimDAO claimDAO;
@@ -257,15 +268,7 @@ public class ClaimService {
         int runId = adjudicationResultsDAO.maxRunId(claimId) + 1;
 
         // Reverse prior accumulator contribution if present and not already reversed
-        ClaimAccumulatorContribution prior = contributionDAO.findByClaimId(claimId);
-        if (prior != null && !prior.isReversed()) {
-            Plan priorPlan = planDAO.findById(claim.getPlanId());
-            if (priorPlan == null) {
-                throw new ServiceException("Plan not found for re-adjudication reversal: id=" + claim.getPlanId());
-            }
-            voidReversalService.reverse(claimId, claim.getMemberId(), claim.getPlanId(),
-                priorPlan.getBenefitYearStart());
-        }
+        reverseContributionIfPresent(claim);
 
         // Reload all needed entities (validate each — matches the null-guards in submit())
         Member member = memberDAO.findById(claim.getMemberId());
@@ -347,12 +350,18 @@ public class ClaimService {
         }
         Claim claim = requireClaim(claimId);
         assertLegalTransition(claim.getStatus().name(), ClaimStatus.DENIED.name());
-        // Update status + denial reason in one shot
+        // A claim routed to IN_REVIEW during adjudication already contributed to the member's
+        // deductible/OOP accumulators. Denying it means the member paid nothing, so reverse that
+        // contribution — otherwise the accumulators stay inflated and the plan over-pays on the
+        // member's later claims. Mirrors the reversal on VOID and re-adjudication.
+        reverseContributionIfPresent(claim);
+        // Update status + denial reason in one shot. The claim's own notes are preserved; the
+        // denial notes live in the audit trail and EOB, not on top of the submission notes.
         Claim updated = new Claim();
         updated.setId(claimId);
         updated.setStatus(ClaimStatus.DENIED);
         updated.setDenialReasonCode(denialReasonCode);
-        updated.setNotes(notes);
+        updated.setNotes(claim.getNotes());
         updated.setAssignedToUserId(claim.getAssignedToUserId());
         updated.setVersion(claim.getVersion());
         claimDAO.update(updated);
@@ -437,6 +446,28 @@ public class ClaimService {
         return note;
     }
 
+    /**
+     * System-initiated abandonment of a stale PENDING_INFO claim (StaleClaimJob).
+     * Reverses any accumulator contribution the claim made during adjudication — an abandoned
+     * claim pays nothing, so it must not leave the member's deductible/OOP inflated — then
+     * transitions the claim to ABANDONED and audits it. No acting user: this is a system action.
+     */
+    @Transactional
+    public void markAbandoned(int claimId, String reason) {
+        Claim claim = requireClaim(claimId);
+        assertLegalTransition(claim.getStatus().name(), ClaimStatus.ABANDONED.name());
+        reverseContributionIfPresent(claim);
+        claimDAO.updateStatus(claimId, ClaimStatus.ABANDONED.name(), claim.getVersion());
+        ClaimAuditEntry audit = new ClaimAuditEntry();
+        audit.setClaimId(claimId);
+        audit.setEventType("ABANDONED");
+        audit.setOldStatus(claim.getStatus().name());
+        audit.setNewStatus(ClaimStatus.ABANDONED.name());
+        audit.setNotes(reason);
+        claimAuditDAO.insert(audit);
+        auditService.record("ABANDONED", "CLAIM", (long) claimId, reason);
+    }
+
     public List<InfoRequest> findInfoRequests(int claimId) {
         return infoRequestDAO.findByClaimId(claimId);
     }
@@ -457,11 +488,10 @@ public class ClaimService {
      * REVIEWER and ADMIN see any claim. STAFF / FINANCE / ANALYST see only
      * claims they submitted or are assigned to (HIPAA minimum-necessary access).
      */
-    public boolean canViewClaim(Claim claim, com.meridian.claims.model.User user) {
+    public boolean canViewClaim(Claim claim, User user) {
         if (user == null) return false;
-        com.meridian.claims.model.UserRole role = user.getRole();
-        if (role == com.meridian.claims.model.UserRole.REVIEWER
-                || role == com.meridian.claims.model.UserRole.ADMIN) {
+        UserRole role = user.getRole();
+        if (role == UserRole.REVIEWER || role == UserRole.ADMIN) {
             return true;
         }
         int uid = user.getId();
@@ -487,7 +517,7 @@ public class ClaimService {
         return diagnosisDAO.findByClaimId(claimId);
     }
 
-    public List<com.meridian.claims.model.AdjudicationResult> findAdjudicationResults(int claimId) {
+    public List<AdjudicationResult> findAdjudicationResults(int claimId) {
         return adjudicationResultsDAO.findByClaimId(claimId);
     }
 
@@ -505,17 +535,32 @@ public class ClaimService {
         return claim;
     }
 
+    /**
+     * Reverses the claim's deductible/OOP accumulator contribution if one exists and has not
+     * already been reversed. A no-op for claims that never reached the soft-rule stage (hard
+     * denials never write a contribution). Shared by deny(), reAdjudicate() and markAbandoned()
+     * so every exit that leaves a claim unpaid restores the member's accumulators.
+     */
+    private void reverseContributionIfPresent(Claim claim) {
+        ClaimAccumulatorContribution prior = contributionDAO.findByClaimId(claim.getId());
+        if (prior != null && !prior.isReversed()) {
+            Plan plan = planDAO.findById(claim.getPlanId());
+            if (plan == null) {
+                throw new ServiceException("Plan not found for accumulator reversal: id=" + claim.getPlanId());
+            }
+            voidReversalService.reverse(claim.getId(), claim.getMemberId(), claim.getPlanId(),
+                plan.getBenefitYearStart());
+        }
+    }
+
     void assertLegalTransition(String fromStatus, String toStatus) {
-        String[] allowed = LEGAL_TRANSITIONS.get(fromStatus);
+        Set<String> allowed = LEGAL_TRANSITIONS.get(fromStatus);
         if (allowed == null) {
             throw new ServiceException("Unknown source status: " + fromStatus);
         }
-        for (String s : allowed) {
-            if (s.equals(toStatus)) {
-                return;
-            }
+        if (!allowed.contains(toStatus)) {
+            throw new ServiceException("Illegal claim status transition: " + fromStatus + " → " + toStatus);
         }
-        throw new ServiceException("Illegal claim status transition: " + fromStatus + " → " + toStatus);
     }
 
     private MemberCoverage resolveActiveCoverage(int memberId, String coverageOrder, Date dos) {
