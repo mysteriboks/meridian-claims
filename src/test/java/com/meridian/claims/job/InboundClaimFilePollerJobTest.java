@@ -1,9 +1,16 @@
 package com.meridian.claims.job;
 
 import com.meridian.claims.intake.ClaimFileParser;
+import com.meridian.claims.intake.EnrollmentFileMatcher;
 import com.meridian.claims.intake.FhirClaimFileParser;
+import com.meridian.claims.intake.ParserResolver;
+import com.meridian.claims.intake.PriorAuthRequestFileMatcher;
+import com.meridian.claims.intake.StatusInquiryFileMatcher;
 import com.meridian.claims.intake.X12Edi837Parser;
+import com.meridian.claims.service.ClaimStatusInquiryService;
+import com.meridian.claims.service.EnrollmentIntakeService;
 import com.meridian.claims.service.IntakeService;
+import com.meridian.claims.service.PriorAuthRequestService;
 import com.meridian.claims.service.ScheduledJobLogService;
 import org.junit.Before;
 import org.junit.Rule;
@@ -59,16 +66,33 @@ public class InboundClaimFilePollerJobTest {
         archive  = tmp.newFolder("archive").toPath();
         rejected = tmp.newFolder("rejected").toPath();
 
+        ParserResolver parserResolver = new ParserResolver(fhirParser, x12Parser);
+        ReflectionTestUtils.setField(parserResolver, "ediExtensions", "edi,x12,837");
+
+        // Not under test here (see StatusInquiryRoutingTest / PriorAuthRoutingTest) — a mock's
+        // unstubbed matches(...) returns false, so every file in this test falls through to the
+        // pre-existing claim-submission dispatch, matching prior behaviour exactly.
+        StatusInquiryFileMatcher statusInquiryFileMatcher = mock(StatusInquiryFileMatcher.class);
+        ClaimStatusInquiryService claimStatusInquiryService = mock(ClaimStatusInquiryService.class);
+        PriorAuthRequestFileMatcher priorAuthRequestFileMatcher = mock(PriorAuthRequestFileMatcher.class);
+        PriorAuthRequestService priorAuthRequestService = mock(PriorAuthRequestService.class);
+        EnrollmentFileMatcher enrollmentFileMatcher = mock(EnrollmentFileMatcher.class);
+        EnrollmentIntakeService enrollmentIntakeService = mock(EnrollmentIntakeService.class);
+
         job = new InboundClaimFilePollerJob();
-        ReflectionTestUtils.setField(job, "intakeService",  intakeService);
-        ReflectionTestUtils.setField(job, "jobLogService",  jobLogService);
-        ReflectionTestUtils.setField(job, "fhirParser",     fhirParser);
-        ReflectionTestUtils.setField(job, "x12Parser",      x12Parser);
-        ReflectionTestUtils.setField(job, "intakeEnabled",  true);
-        ReflectionTestUtils.setField(job, "inboundPath",    inbound.toString());
-        ReflectionTestUtils.setField(job, "archivePath",    archive.toString());
-        ReflectionTestUtils.setField(job, "rejectedPath",   rejected.toString());
-        ReflectionTestUtils.setField(job, "ediExtensions",  "edi,x12,837");
+        ReflectionTestUtils.setField(job, "intakeService",              intakeService);
+        ReflectionTestUtils.setField(job, "claimStatusInquiryService",  claimStatusInquiryService);
+        ReflectionTestUtils.setField(job, "priorAuthRequestService",    priorAuthRequestService);
+        ReflectionTestUtils.setField(job, "jobLogService",              jobLogService);
+        ReflectionTestUtils.setField(job, "parserResolver",             parserResolver);
+        ReflectionTestUtils.setField(job, "statusInquiryFileMatcher",   statusInquiryFileMatcher);
+        ReflectionTestUtils.setField(job, "priorAuthRequestFileMatcher", priorAuthRequestFileMatcher);
+        ReflectionTestUtils.setField(job, "enrollmentFileMatcher",       enrollmentFileMatcher);
+        ReflectionTestUtils.setField(job, "enrollmentIntakeService",     enrollmentIntakeService);
+        ReflectionTestUtils.setField(job, "intakeEnabled",              true);
+        ReflectionTestUtils.setField(job, "inboundPath",                inbound.toString());
+        ReflectionTestUtils.setField(job, "archivePath",                archive.toString());
+        ReflectionTestUtils.setField(job, "rejectedPath",               rejected.toString());
     }
 
     private Path dropFile(String name, String content) throws IOException {

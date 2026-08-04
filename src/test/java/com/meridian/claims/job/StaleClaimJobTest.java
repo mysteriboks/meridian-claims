@@ -1,11 +1,11 @@
 package com.meridian.claims.job;
 
-import com.meridian.claims.dao.ClaimAuditDAO;
 import com.meridian.claims.dao.ClaimDAO;
 import com.meridian.claims.dao.InfoRequestDAO;
 import com.meridian.claims.model.Claim;
 import com.meridian.claims.model.ClaimStatus;
 import com.meridian.claims.model.InfoRequest;
+import com.meridian.claims.service.ClaimService;
 import com.meridian.claims.service.ScheduledJobLogService;
 import com.meridian.claims.util.Page;
 import org.junit.Before;
@@ -25,7 +25,7 @@ public class StaleClaimJobTest {
     private StaleClaimJob job;
     private ClaimDAO claimDAO;
     private InfoRequestDAO infoRequestDAO;
-    private ClaimAuditDAO claimAuditDAO;
+    private ClaimService claimService;
     private ScheduledJobLogService jobLogService;
 
     @Before
@@ -33,11 +33,11 @@ public class StaleClaimJobTest {
         job = new StaleClaimJob();
         claimDAO = Mockito.mock(ClaimDAO.class);
         infoRequestDAO = Mockito.mock(InfoRequestDAO.class);
-        claimAuditDAO = Mockito.mock(ClaimAuditDAO.class);
+        claimService = Mockito.mock(ClaimService.class);
         jobLogService = Mockito.mock(ScheduledJobLogService.class);
         ReflectionTestUtils.setField(job, "claimDAO", claimDAO);
         ReflectionTestUtils.setField(job, "infoRequestDAO", infoRequestDAO);
-        ReflectionTestUtils.setField(job, "claimAuditDAO", claimAuditDAO);
+        ReflectionTestUtils.setField(job, "claimService", claimService);
         ReflectionTestUtils.setField(job, "jobLogService", jobLogService);
     }
 
@@ -59,15 +59,16 @@ public class StaleClaimJobTest {
 
         job.execute(Mockito.mock(JobExecutionContext.class));
 
-        // Only c1 abandoned
-        Mockito.verify(claimDAO).updateStatus(1, "ABANDONED", c1.getVersion());
-        Mockito.verify(claimDAO, Mockito.never()).updateStatus(Mockito.eq(2), Mockito.anyString(), Mockito.anyInt());
+        // Only c1 abandoned — delegated to the service so the accumulator reversal + status
+        // transition + audit happen atomically (see ClaimService.markAbandoned).
+        Mockito.verify(claimService).markAbandoned(Mockito.eq(1), Mockito.anyString());
+        Mockito.verify(claimService, Mockito.never()).markAbandoned(Mockito.eq(2), Mockito.anyString());
     }
 
     @Test
     public void execute_collectsAcrossPagesBeforeMutating() {
         // Regression for paging-while-mutating: two full pages, ALL due. Every claim must be
-        // collected (read-only) before any status update, so none are skipped.
+        // collected (read-only) before any abandonment, so none are skipped.
         List<Claim> pageOne = new ArrayList<Claim>();
         for (int i = 1; i <= 100; i++) pageOne.add(pendingInfo(i));
         List<Claim> pageTwo = new ArrayList<Claim>();
@@ -85,8 +86,8 @@ public class StaleClaimJobTest {
         job.execute(Mockito.mock(JobExecutionContext.class));
 
         // All 150 claims must be abandoned — none skipped by page shifting
-        Mockito.verify(claimDAO, Mockito.times(150))
-            .updateStatus(Mockito.anyInt(), Mockito.eq("ABANDONED"), Mockito.anyInt());
+        Mockito.verify(claimService, Mockito.times(150))
+            .markAbandoned(Mockito.anyInt(), Mockito.anyString());
         Mockito.verify(jobLogService).complete(Mockito.anyInt(), Mockito.eq(150));
     }
 
@@ -98,6 +99,7 @@ public class StaleClaimJobTest {
         job.execute(Mockito.mock(JobExecutionContext.class));
 
         Mockito.verify(jobLogService).complete(Mockito.anyInt(), Mockito.eq(0));
+        Mockito.verifyZeroInteractions(claimService);
     }
 
     private Claim pendingInfo(int id) {

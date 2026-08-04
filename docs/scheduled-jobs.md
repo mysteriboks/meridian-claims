@@ -17,7 +17,8 @@ fields are populated at runtime.
 | `BenefitYearRolloverJob` | `0 0 3 * * ?` | 03:00 nightly | Audit-log check: warns when a plan's deductible accumulator is keyed to a prior benefit year | `claims.jobs.rollover.cron` |
 | `SlowQueryReportJob` | `0 0 4 * * ?` | 04:00 nightly | Queries `pg_stat_statements` for slow queries and emails a report to the DBA | `claims.jobs.slowquery.cron` |
 | `ClaimArchiveJob` | `0 0 1 * * ?` | 01:00 nightly | Moves terminal-state claims older than the retention threshold from `claims` to `claims_archive` | `claims.jobs.archive.cron` |
-| `InboundClaimFilePollerJob` | `0 0/5 * * * ?` | Every 5 minutes | Polls the configured inbound directory for claim files; parses and submits them through the adjudication pipeline; moves files to `archive/` or `rejected/` | `claims.jobs.intake.cron` |
+| `InboundClaimFilePollerJob` | `0 0/5 * * * ?` | Every 5 minutes | Polls the configured inbound directory for claim files; parses and submits them through the adjudication pipeline (or, for a `.276` status inquiry, resolves and responds read-only; or, for a `.278` prior-auth request, certifies or denies it; or, for a `.834` enrollment file, adds/terminates/changes member and coverage records); moves files to `archive/` or `rejected/` | `claims.jobs.intake.cron` |
+| `TradingPartnerPollerJob` | `0 0/10 * * * ?` | Every 10 minutes | Polls every active `trading_partners` row via its own transport (local dir or SFTP); submits claim files through the same pipeline (or handles `.276` status inquiries / `.278` prior-auth requests / `.834` enrollment files); archives/rejects; pushes 999/277CA/TA1/277/278 responses back through that partner's own outbound transport (834 has no response to push) | `claims.jobs.trading-partner.cron` |
 
 All cron expressions follow Quartz 6-field format: `seconds minutes hours day-of-month month day-of-week`.
 
@@ -72,7 +73,7 @@ in the Quartz thread pool; refresh the page after a few seconds to see the resul
 history table.
 
 Only jobs registered in the `triggerableJobs` list exposed by `AdminOperationsController` appear
-in the dropdown. All seven jobs listed in this document are triggerable.
+in the dropdown. All eight jobs listed in this document are triggerable.
 
 ### Graceful shutdown
 
@@ -473,12 +474,25 @@ is blank. Annotated `@DisallowConcurrentExecution` — only one poller run can b
 
 #### Supported formats
 
-| Extension | Parser | Format |
+| Extension | Handler | Format |
 | --- | --- | --- |
-| `.json` | `FhirClaimFileParser` | FHIR R4 Claim JSON (single resource or Bundle) |
-| `.edi`, `.x12`, `.837` (configurable) | `X12Edi837Parser` | X12 EDI 837P (professional) or 837I (institutional) |
+| `.json` | `FhirClaimFileParser` (claim submission) | FHIR R4 Claim JSON (single resource or Bundle) |
+| `.edi`, `.x12`, `.837` (configurable) | `X12Edi837Parser` (claim submission) | X12 EDI 837P (professional) or 837I (institutional) |
+| `.276` (configurable, Phase 14) | `X12Edi276Parser` + `ClaimStatusInquiryService` (read-only status check) | X12 276 claim status inquiry — never submits a claim; generates a 277 response |
+| `.278` (configurable, Phase 15) | `X12Edi278Parser` + `PriorAuthRequestService` (prior-auth request) | X12 278 prior-authorization request — a certified request creates a real `prior_authorizations` row; generates a 278 response |
+| `.834` (configurable, Phase 17) | `X12Edi834Parser` + `EnrollmentIntakeService` (enrollment/maintenance) | X12 834 benefit enrollment/maintenance — adds, terminates, or changes member and coverage records per INS loop; no response document generated |
 
-Extensions are case-insensitive. Files with unrecognised extensions are skipped with a warning log.
+Extensions are case-insensitive; the `.276`, `.278`, and `.834` checks run before the
+claim-submission dispatch above, in that order. Files with unrecognised extensions are skipped
+with a warning log.
+
+Real-time eligibility (X12 270/271, Phase 16) is **not** in this table — it has no file
+extension or poller involvement. It's a synchronous member-screen action; see
+[operations.md](operations.md) → "Real-time eligibility check (X12 270/271)".
+
+EFT/ACH payment issuance (NACHA, Phase 18) is also **not** in this table — it has no file
+extension or poller involvement either. It runs synchronously when a payment batch is exported
+in the Finance UI; see [operations.md](operations.md) → "EFT/ACH payment issuance".
 
 #### Idempotency
 
@@ -526,6 +540,59 @@ The quarantine reason is written to `audit_log` and is visible in **Admin → In
 
 ---
 
+### TradingPartnerPollerJob
+
+**Cron config key:** `claims.jobs.trading-partner.cron`
+**Default cron:** `0 0/10 * * * ?` (every 10 minutes)
+
+#### What it does
+
+Polls every **active** row in `trading_partners` (Phase 13), independently of the single global
+directory `InboundClaimFilePollerJob` watches. For each partner: resolves its transport
+(`LOCAL` directory or `SFTP`, via `TransportAdapterResolver`), lists inbound files, and routes
+each by extension exactly like the global poller — claim files through `IntakeService`
+(with the partner's id attached, so every `edi_transactions` row it writes is attributable),
+`.276` status inquiries through `ClaimStatusInquiryService`, `.278` prior-auth requests through
+`PriorAuthRequestService`, `.834` enrollment files through `EnrollmentIntakeService` — archives/
+rejects the file through that partner's transport, then (for every type except `.834`, which has
+no response document) retrieves the response(s) generated (999/277CA/TA1/277/278) and pushes
+them back through **that same partner's own outbound path** — a real trading-partner exchange
+gets its responses delivered, not just logged to the shared disk path Phase 12 introduced.
+
+One partner's transport failure (connection refused, bad credentials, missing path) is logged
+and that partner is skipped for the run; it never stops the other partners. Annotated
+`@DisallowConcurrentExecution`, mirroring the global poller.
+
+#### Supported formats
+
+Same extension→handler table as `InboundClaimFilePollerJob` above (`ParserResolver`,
+`StatusInquiryFileMatcher`, and `PriorAuthRequestFileMatcher` are the single shared dispatch
+components both jobs use).
+
+#### Credentials
+
+`SFTP` partners never store a password in `trading_partners` — only a `transport_credential_ref`
+key name. The real password is resolved at connect time from
+`claims.transport.credential.<ref>` (set only in the external prod overlay). A partner missing
+its credential fails cleanly with a logged `TransportException`, not a silent skip.
+
+#### Operational monitoring
+
+- Every transaction (inbound and each acknowledgment) is visible in **Admin → Integrations**,
+  now with a **Partner** column.
+- Trading partners themselves are managed at **Admin → Trading Partners**.
+- To trigger a manual poll: Admin → Operations → select `tradingPartnerPollerJobDetail` → Run Now.
+- `records_processed` in `scheduled_job_log` equals the number of files handled across all
+  active partners in that run.
+
+#### Logging
+
+- `INFO` per partner processed, and per file with succeeded/quarantined counts.
+- `ERROR` on a partner's transport failure (that partner's files are left for the next poll) or
+  on an individual acknowledgment-delivery failure (the file itself is still counted as handled).
+
+---
+
 ## Configuration Quick Reference
 
 All properties belong in `application.properties` (or the environment-specific overlay).
@@ -539,6 +606,7 @@ claims.jobs.rollover.cron=0 0 3 * * ?
 claims.jobs.slowquery.cron=0 0 4 * * ?
 claims.jobs.archive.cron=0 0 1 * * ?
 claims.jobs.intake.cron=0 0/5 * * * ?
+claims.jobs.trading-partner.cron=0 0/10 * * * ?
 
 # SLA thresholds
 claims.sla.SUBMITTED.hours=24

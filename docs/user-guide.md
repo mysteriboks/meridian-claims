@@ -312,11 +312,29 @@ To remove a coverage record, click **Remove** on the relevant row and confirm. R
 
 On a member detail screen, click **+ Prior Auth** or **+ Referral** to create the corresponding record pre-filled with the member's ID. You can also navigate to **Prior Auth** or **Referrals** in the navigation bar and create records from there.
 
+#### Checking eligibility
+
+On the member detail screen, click **Check Eligibility** to run a real-time coverage check
+(X12 270/271). The result appears immediately as a banner — **ACTIVE**, **INACTIVE**, or a
+failure message — and every check is logged in the **Eligibility Check History** table below
+the coverage records, showing the timestamp, service type, result, and a short coverage
+description for each of the last 10 checks. No live clearinghouse connection exists yet, so
+the check is answered from the member's own coverage records rather than an outside network
+call — the result still reflects that member's real coverage state.
+
 ---
 
 ### 5.6 Managing providers
 
 Navigate to **Providers** in the navigation bar. The workflow mirrors members: list view with search, a detail view showing NPI and network status, and edit controls. Creating a provider requires name, NPI, and network status.
+
+#### Direct deposit (ACH) banking info
+
+On the provider detail screen, the **Direct Deposit (ACH) Banking Info** section lets you set
+the routing number, account number, and account type (CHECKING/SAVINGS) used to pay this
+provider electronically. Leave it unset if the provider should keep being paid by check — a
+provider with no banking info configured is simply skipped (not blocked) when a payment batch's
+ACH file is generated. The account number is masked everywhere it's displayed.
 
 ---
 
@@ -489,6 +507,17 @@ The count of currently pending payments is shown above the button so you can con
 #### Batch list
 
 All batches are listed below with their batch number, date, total dollar amount, status (PENDING or EXPORTED), and a file reference once exported. Click **View** to open a batch detail screen showing the individual payments in the batch and controls to export the batch file.
+
+#### Electronic payment (EFT/ACH)
+
+Exporting a batch also attempts to issue an electronic payment automatically — no separate
+step. If any provider in the batch has ACH banking info configured (see 5.6 "Direct deposit
+(ACH) banking info"), the batch detail screen shows an **Electronic Payment (EFT/ACH)** section
+with the amount paid electronically, the TRN reassociation number, and how many providers were
+paid electronically vs. skipped. From there you can **Download ACH File** (the file to hand to
+your bank/ODFI) and, once the bank confirms the funds moved, **Mark Settled**. If no provider in
+the batch has banking info configured, this section is empty and the whole batch is check-paid,
+exactly as before this feature existed.
 
 ---
 
@@ -709,7 +738,93 @@ To process files manually without waiting for the 5-minute poll interval, go to
 
 ---
 
-### 8.6 Audit Log
+### 8.6 Integrations
+
+Navigate to **Admin > Integrations** in the navigation bar.
+
+This is a read-only log of every EDI transaction the system has sent or received — the
+inbound X12 837 files that arrived (from the shared inbound directory or from a trading
+partner), their acknowledgments (999, 277CA, or TA1), claim status inquiries (276) providers
+have sent along with the system's 277 responses, and prior-authorization requests (278) along
+with the system's certification responses.
+
+Each row shows:
+
+| Column | Description |
+| --- | --- |
+| **Direction** | **INBOUND** (a file we received) or **OUTBOUND** (a response we generated) |
+| **Type** | `837` (claim file), `999` (functional acknowledgment), `277CA` (claim-level acknowledgment), `TA1` (interchange-level reject), `276` (claim status inquiry), `277` (claim status response), or `278` (prior-authorization request or response) |
+| **ISA/GS/ST Control #** | The X12 control numbers, used to match an acknowledgment back to the file it responds to |
+| **Status** | **ACCEPTED**, **PARTIAL** (some records quarantined), or **REJECTED** |
+| **Related #** | For an acknowledgment row, the ID of the inbound file row it responds to |
+| **Partner** | Which trading partner the file came from, or "global" if it was dropped in the shared inbound directory |
+| **File** | Original filename |
+| **Created At** | Timestamp |
+
+Use this screen to confirm a submitted file was actually acknowledged, and to see why a file
+or an individual claim within it was rejected. Real-time eligibility checks (270/271) and
+enrollment files (834) do **not** appear here — see 5.5 "Checking eligibility" and 8.7
+"Enrollment Batches" below.
+
+---
+
+### 8.7 Enrollment Batches
+
+Navigate to **Admin > Enrollment Batches** in the navigation bar.
+
+This is a read-only log of every X12 834 (benefit enrollment/maintenance) file the system has
+processed, whether dropped in the shared inbound directory or received from a trading partner.
+Same layout as Intake Batches (8.5):
+
+| Column | Description |
+| --- | --- |
+| **#** | Batch ledger ID |
+| **File Name** | Original filename |
+| **Status** | **COMPLETED** (all records applied), **PARTIAL** (some quarantined), or **FAILED** (no records applied) |
+| **Total** | Number of enrollment records (INS loops) in the file |
+| **Succeeded** | Records successfully applied — a member created/updated or a coverage record added/terminated |
+| **Quarantined** | Records that failed validation and were not applied |
+| **Processed At** | Timestamp the poller finished processing the file |
+| **Notes** | Quarantine reasons for failed records (e.g. unknown member, plan not found) |
+
+Members and coverage records created or updated via 834 appear in the normal Members screens
+exactly like ones entered manually — there is no separate "electronic member" designation.
+
+---
+
+### 8.7 Trading Partners
+
+Navigate to **Admin > Trading Partners** in the navigation bar.
+
+Trading partners are the providers, clearinghouses, or other counterparties the system
+exchanges EDI files with directly, instead of through the single shared inbound directory. A
+scheduled job polls every **active** partner on its own schedule and delivers acknowledgments
+back to that same partner.
+
+#### Adding a trading partner
+
+1. Click **+ New Trading Partner**.
+2. Fill in the partner's **X12 identity**: Partner Name, ISA Qualifier, ISA ID, GS ID (your
+   partner provides these).
+3. Choose a **Transport**:
+   - **LOCAL** — files are exchanged through a local directory pair (Inbound Path / Outbound
+     Path), the same mechanism the shared intake directory uses.
+   - **SFTP** — files are exchanged over SFTP. Fill in the host, port, username, and a
+     **Credential Reference** — a short name (e.g. `acme-primary`), *not* the password itself.
+     Ask an administrator with access to the production configuration to set the matching
+     password before this partner can connect; see [security.md](security.md) if you're that
+     administrator.
+4. Save. The partner is **active** by default and will be polled on the next scheduled run.
+
+#### Editing or deactivating a partner
+
+Click a partner's name to edit its configuration. Click **Deactivate** to stop polling a
+partner without deleting its history — its past transactions remain visible on the
+Integrations screen.
+
+---
+
+### 8.8 Audit Log
 
 Navigate to **Admin > Audit Log** in the navigation bar.
 

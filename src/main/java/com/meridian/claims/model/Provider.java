@@ -12,6 +12,11 @@ public class Provider {
     private NetworkStatus networkStatus;
     private String phone;
     private String address;
+    private String achRoutingNumber;
+    private String achAccountNumber;
+    private String achAccountType;
+    private String npiValidationStatus;
+    private Date npiValidatedAt;
     private Date deletedAt;
     private Date createdAt;
     private Date updatedAt;
@@ -39,6 +44,21 @@ public class Provider {
 
     public String getAddress() { return address; }
     public void setAddress(String address) { this.address = address; }
+
+    public String getAchRoutingNumber() { return achRoutingNumber; }
+    public void setAchRoutingNumber(String achRoutingNumber) { this.achRoutingNumber = achRoutingNumber; }
+
+    public String getAchAccountNumber() { return achAccountNumber; }
+    public void setAchAccountNumber(String achAccountNumber) { this.achAccountNumber = achAccountNumber; }
+
+    public String getAchAccountType() { return achAccountType; }
+    public void setAchAccountType(String achAccountType) { this.achAccountType = achAccountType; }
+
+    public String getNpiValidationStatus() { return npiValidationStatus; }
+    public void setNpiValidationStatus(String npiValidationStatus) { this.npiValidationStatus = npiValidationStatus; }
+
+    public Date getNpiValidatedAt() { return npiValidatedAt; }
+    public void setNpiValidatedAt(Date npiValidatedAt) { this.npiValidatedAt = npiValidatedAt; }
 
     public Date getDeletedAt() { return deletedAt; }
     public void setDeletedAt(Date deletedAt) { this.deletedAt = deletedAt; }

@@ -6,8 +6,10 @@ import com.meridian.claims.model.PaymentBatch;
 import com.meridian.claims.model.RemittanceBatch;
 import com.meridian.claims.model.RemittanceBatchItem;
 import com.meridian.claims.model.User;
+import com.meridian.claims.model.EftPayment;
 import com.meridian.claims.service.AuthenticationService;
 import com.meridian.claims.service.Edi835Generator;
+import com.meridian.claims.service.EftPaymentService;
 import com.meridian.claims.service.EobService;
 import com.meridian.claims.service.MemberExportService;
 import com.meridian.claims.service.PaymentBatchService;
@@ -46,6 +48,7 @@ public class FinanceController {
     @Autowired private EobService eobDocumentService;
     @Autowired private RemittanceService remittanceService;
     @Autowired private Edi835Generator edi835Generator;
+    @Autowired private EftPaymentService eftPaymentService;
     @Autowired private SubrogationService subrogationService;
     @Autowired private MemberExportService memberExportService;
     @Autowired private AuthenticationService authService;
@@ -206,7 +209,9 @@ public class FinanceController {
             return;
         }
         List<RemittanceBatchItem> items = remittanceService.findItemsByBatchId(id);
-        String content = edi835Generator.generate(batch, items);
+        EftPayment eftPayment = eftPaymentService.findByRemittanceBatchId(id);
+        String content = edi835Generator.generate(batch, items,
+            eftPayment != null ? eftPayment.getTrnReassociationNumber() : null);
         response.setContentType("application/EDI-X12; charset=UTF-8");
         response.setHeader("Content-Disposition", "attachment; filename=\"remittance-" + id + ".835\"");
         response.getWriter().write(content);
@@ -248,7 +253,33 @@ public class FinanceController {
         PaymentBatch batch = paymentBatchService.findById(id);
         if (batch == null) return "redirect:/finance/batches";
         model.addAttribute("batch", batch);
+        model.addAttribute("eftPayment", eftPaymentService.findByPaymentBatchId(id));
         return "finance/batch-detail";
+    }
+
+    @RequestMapping(value = "/batches/{id}/ach", method = RequestMethod.GET)
+    public void downloadAch(@PathVariable("id") int id, HttpServletResponse response) throws IOException {
+        PaymentBatch batch = paymentBatchService.findById(id);
+        EftPayment eftPayment = batch != null ? eftPaymentService.findByPaymentBatchId(id) : null;
+        if (batch == null || eftPayment == null) {
+            response.sendError(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+        List<RemittanceBatchItem> items = remittanceService.findItemsByBatchId(eftPayment.getRemittanceBatchId());
+        String achText = eftPaymentService.regenerateAchText(batch, items, eftPayment);
+        response.setContentType("text/plain; charset=UTF-8");
+        response.setHeader("Content-Disposition", "attachment; filename=\"eft-" + id + ".ach\"");
+        response.getWriter().write(achText);
+    }
+
+    @RequestMapping(value = "/batches/{id}/eft/settle", method = RequestMethod.POST)
+    public String markEftSettled(@PathVariable("id") int id, RedirectAttributes flash) {
+        EftPayment eftPayment = eftPaymentService.findByPaymentBatchId(id);
+        if (eftPayment != null) {
+            eftPaymentService.markSettled(eftPayment.getId());
+            flash.addFlashAttribute("success", "EFT payment marked as settled");
+        }
+        return "redirect:/finance/batches/" + id;
     }
 
     @RequestMapping(value = "/batches/{id}/export", method = RequestMethod.POST)

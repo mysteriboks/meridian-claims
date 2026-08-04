@@ -177,4 +177,55 @@ public class Edi835GeneratorTest {
         // adjustment = billed - planPaid = 200.00 - 123.45 = 76.55
         assertTrue("Must contain adjustment amount 76.55", result.contains("76.55"));
     }
+
+    // -------------------------------------------------------------------------
+    // Test 4: TRN reassociation number (Phase 18) — ACH-paid batches
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void generate_withReassociationNumber_stampsTrnAndAchPaymentMethod() throws Exception {
+        RemittanceBatch batch = new RemittanceBatch();
+        batch.setId(7);
+        batch.setPaymentDate(new Date());
+        batch.setTotalPaid(new BigDecimal("100.00"));
+
+        RemittanceBatchItem item = new RemittanceBatchItem();
+        item.setId(1);
+        item.setClaimId(1);
+        item.setBilled(new BigDecimal("100.00"));
+        item.setPlanPaid(new BigDecimal("100.00"));
+
+        List<RemittanceBatchItem> items = new ArrayList<RemittanceBatchItem>();
+        items.add(item);
+
+        String result = generator.generate(batch, items, "EFT000000007");
+
+        assertTrue("TRN02 must carry the reassociation number, not the batch id",
+            result.contains("TRN*1*EFT000000007"));
+        assertTrue("BPR04 must be ACH when a reassociation number is present",
+            result.contains("*ACH*"));
+    }
+
+    @Test
+    public void generate_withoutReassociationNumber_fallsBackToBatchIdAndCheck() throws Exception {
+        RemittanceBatch batch = new RemittanceBatch();
+        batch.setId(7);
+        batch.setPaymentDate(new Date());
+        batch.setTotalPaid(new BigDecimal("100.00"));
+
+        RemittanceBatchItem item = new RemittanceBatchItem();
+        item.setId(1);
+        item.setClaimId(1);
+        item.setBilled(new BigDecimal("100.00"));
+        item.setPlanPaid(new BigDecimal("100.00"));
+
+        List<RemittanceBatchItem> items = new ArrayList<RemittanceBatchItem>();
+        items.add(item);
+
+        String result = generator.generate(batch, items);
+
+        assertTrue("TRN02 must fall back to the plain batch id", result.contains("TRN*1*7*"));
+        assertTrue("BPR04 must stay CHK when no reassociation number is present",
+            result.contains("*CHK*"));
+    }
 }

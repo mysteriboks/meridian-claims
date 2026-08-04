@@ -22,6 +22,9 @@ public final class ValidationUtil {
     // NPI: exactly 10 digits.
     private static final Pattern NPI = Pattern.compile("^[0-9]{10}$");
 
+    // ACH routing number (ABA number): exactly 9 digits.
+    private static final Pattern ACH_ROUTING = Pattern.compile("^[0-9]{9}$");
+
     // Safe free-text: rejects the angle brackets that could open/close an HTML tag.
     // Apostrophes, ampersands, and quotes are intentionally ALLOWED — legitimate
     // names ("O'Brien", "Smith & Sons") contain them, and output is escaped at the
@@ -56,6 +59,11 @@ public final class ValidationUtil {
     /** True if s is a 10-digit NPI. */
     public static boolean npi(String s) {
         return s != null && NPI.matcher(s.trim()).matches();
+    }
+
+    /** True if s is a 9-digit ACH routing (ABA) number. */
+    public static boolean achRoutingNumber(String s) {
+        return s != null && ACH_ROUTING.matcher(s.trim()).matches();
     }
 
     /** True if the value represents a positive integer (e.g. a foreign-key ID). */

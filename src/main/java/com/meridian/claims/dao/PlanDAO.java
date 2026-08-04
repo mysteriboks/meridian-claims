@@ -9,6 +9,9 @@ public interface PlanDAO {
 
     Plan findById(int id);
 
+    /** Case-insensitive exact match on plan_name among active (non-deleted) plans. Returns null if not found. */
+    Plan findByName(String planName);
+
     Page<Plan> findAll(int pageNumber, int pageSize);
 
     List<Plan> findAllActive();

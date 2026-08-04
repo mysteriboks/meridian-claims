@@ -1,9 +1,14 @@
 package com.meridian.claims.job;
 
 import com.meridian.claims.intake.ClaimFileParser;
-import com.meridian.claims.intake.FhirClaimFileParser;
-import com.meridian.claims.intake.X12Edi837Parser;
+import com.meridian.claims.intake.EnrollmentFileMatcher;
+import com.meridian.claims.intake.ParserResolver;
+import com.meridian.claims.intake.PriorAuthRequestFileMatcher;
+import com.meridian.claims.intake.StatusInquiryFileMatcher;
+import com.meridian.claims.service.ClaimStatusInquiryService;
+import com.meridian.claims.service.EnrollmentIntakeService;
 import com.meridian.claims.service.IntakeService;
+import com.meridian.claims.service.PriorAuthRequestService;
 import com.meridian.claims.service.ScheduledJobLogService;
 import org.apache.log4j.Logger;
 import org.quartz.DisallowConcurrentExecution;
@@ -44,9 +49,14 @@ public class InboundClaimFilePollerJob implements Job {
     private static final Logger LOG = Logger.getLogger(InboundClaimFilePollerJob.class);
 
     @Autowired private IntakeService intakeService;
+    @Autowired private ClaimStatusInquiryService claimStatusInquiryService;
+    @Autowired private PriorAuthRequestService priorAuthRequestService;
     @Autowired private ScheduledJobLogService jobLogService;
-    @Autowired private FhirClaimFileParser fhirParser;
-    @Autowired private X12Edi837Parser x12Parser;
+    @Autowired private ParserResolver parserResolver;
+    @Autowired private StatusInquiryFileMatcher statusInquiryFileMatcher;
+    @Autowired private PriorAuthRequestFileMatcher priorAuthRequestFileMatcher;
+    @Autowired private EnrollmentFileMatcher enrollmentFileMatcher;
+    @Autowired private EnrollmentIntakeService enrollmentIntakeService;
 
     @Value("${claims.intake.enabled:false}")
     private boolean intakeEnabled;
@@ -59,9 +69,6 @@ public class InboundClaimFilePollerJob implements Job {
 
     @Value("${claims.intake.rejected.path:}")
     private String rejectedPath;
-
-    @Value("${claims.intake.edi.extensions:edi,x12,837}")
-    private String ediExtensions;
 
     @Override
     public void execute(JobExecutionContext context) {
@@ -92,7 +99,28 @@ public class InboundClaimFilePollerJob implements Job {
                     if (!Files.isRegularFile(file)) continue;
                     String fileName = file.getFileName().toString();
 
-                    ClaimFileParser parser = parserFor(fileName);
+                    if (statusInquiryFileMatcher.matches(fileName)) {
+                        if (processStatusInquiryFile(file, fileName, archive, rejected)) {
+                            filesProcessed++;
+                        }
+                        continue;
+                    }
+
+                    if (priorAuthRequestFileMatcher.matches(fileName)) {
+                        if (processPriorAuthRequestFile(file, fileName, archive, rejected)) {
+                            filesProcessed++;
+                        }
+                        continue;
+                    }
+
+                    if (enrollmentFileMatcher.matches(fileName)) {
+                        if (processEnrollmentFile(file, fileName, archive, rejected)) {
+                            filesProcessed++;
+                        }
+                        continue;
+                    }
+
+                    ClaimFileParser parser = parserResolver.resolve(fileName);
                     if (parser == null) {
                         LOG.warn("InboundClaimFilePollerJob: skipping " + fileName
                             + " — unrecognised file extension");
@@ -143,29 +171,71 @@ public class InboundClaimFilePollerJob implements Job {
     }
 
     /**
-     * Return the parser appropriate for the given file name, or null if the
-     * extension is not recognised (caller should skip the file).
-     *
-     * - .json files are handled by FhirClaimFileParser.
-     * - Files whose extension (case-insensitive) matches any token in
-     *   claims.intake.edi.extensions are handled by X12Edi837Parser.
+     * Processes one X12 276 claim status inquiry file: delegates to
+     * ClaimStatusInquiryService (which generates and logs the 277 response — written to disk
+     * via claims.integration.edi.output.path if configured, same as the 837 ack flow), then
+     * archives (structurally parseable) or rejects (file-level parse failure) the file.
+     * Returns true if the file was handled (moved) either way.
      */
-    private ClaimFileParser parserFor(String fileName) {
-        int dot = fileName.lastIndexOf('.');
-        if (dot < 0) {
-            return null;
+    private boolean processStatusInquiryFile(Path file, String fileName, Path archive, Path rejected) {
+        try {
+            String content = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+            boolean parsed = claimStatusInquiryService.processFile(fileName, content, null);
+            return archiveOrReject(file, fileName, parsed, archive, rejected, "status inquiry");
+        } catch (Exception e) {
+            LOG.error("InboundClaimFilePollerJob: failed to process status inquiry " + fileName
+                + " — moving to rejected: " + e.getMessage(), e);
+            return moveFile(file, rejected.resolve(fileName));
         }
-        String ext = fileName.substring(dot + 1).toLowerCase();
-        if ("json".equals(ext)) {
-            return fhirParser;
+    }
+
+    /**
+     * Processes one X12 278 prior-authorization request file: delegates to
+     * PriorAuthRequestService (which creates the authorization when certified and generates +
+     * logs the 278 response), then archives or rejects the file — same shape as the 276 handler
+     * above.
+     */
+    private boolean processPriorAuthRequestFile(Path file, String fileName, Path archive, Path rejected) {
+        try {
+            String content = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+            boolean parsed = priorAuthRequestService.processFile(fileName, content, null);
+            return archiveOrReject(file, fileName, parsed, archive, rejected, "prior auth request");
+        } catch (Exception e) {
+            LOG.error("InboundClaimFilePollerJob: failed to process prior auth request " + fileName
+                + " — moving to rejected: " + e.getMessage(), e);
+            return moveFile(file, rejected.resolve(fileName));
         }
-        String[] ediExts = ediExtensions.split(",");
-        for (int i = 0; i < ediExts.length; i++) {
-            if (ediExts[i].trim().toLowerCase().equals(ext)) {
-                return x12Parser;
-            }
+    }
+
+    /**
+     * Processes one X12 834 enrollment file: delegates to EnrollmentIntakeService (file-level
+     * idempotency + per-record add/change/termination dispatch against member/coverage data),
+     * then archives (at least one record succeeded) or rejects (file-level parse failure, or
+     * every record quarantined) the file — same shape as the 276/278 handlers above.
+     */
+    private boolean processEnrollmentFile(Path file, String fileName, Path archive, Path rejected) {
+        try {
+            String content = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+            IntakeService.IntakeSummary summary = enrollmentIntakeService.processFile(fileName, content);
+            return archiveOrReject(file, fileName, !summary.shouldReject(), archive, rejected, "enrollment file");
+        } catch (Exception e) {
+            LOG.error("InboundClaimFilePollerJob: failed to process enrollment file " + fileName
+                + " — moving to rejected: " + e.getMessage(), e);
+            return moveFile(file, rejected.resolve(fileName));
         }
-        return null;
+    }
+
+    /** Shared archive-vs-rejected move + logging for the ancillary (non-submission) file handlers above. */
+    private boolean archiveOrReject(Path file, String fileName, boolean accepted, Path archive, Path rejected, String logLabel) {
+        Path dest = accepted ? archive.resolve(fileName) : rejected.resolve(fileName);
+        if (moveFile(file, dest)) {
+            LOG.info("InboundClaimFilePollerJob: moved " + logLabel + " " + fileName + " to "
+                + (accepted ? "archive/" : "rejected/"));
+            return true;
+        }
+        LOG.error("InboundClaimFilePollerJob: " + fileName
+            + " processed but could not be moved — left in inbound for retry");
+        return false;
     }
 
     /** Returns the configured path if non-empty, else a subdirectory of inbound. */

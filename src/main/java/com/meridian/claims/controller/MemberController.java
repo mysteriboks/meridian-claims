@@ -1,7 +1,11 @@
 package com.meridian.claims.controller;
 
+import com.meridian.claims.model.EligibilityCheck;
 import com.meridian.claims.model.Member;
 import com.meridian.claims.model.MemberStatus;
+import com.meridian.claims.model.User;
+import com.meridian.claims.service.AuthenticationService;
+import com.meridian.claims.service.EligibilityCheckService;
 import com.meridian.claims.service.MemberService;
 import com.meridian.claims.service.PlanService;
 import com.meridian.claims.service.ServiceException;
@@ -17,22 +21,30 @@ import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.servlet.mvc.support.RedirectAttributes;
 
+import javax.servlet.http.HttpServletRequest;
 import java.util.Date;
 
 @Controller
 @RequestMapping("/members")
 public class MemberController {
 
+    private static final int ELIGIBILITY_HISTORY_LIMIT = 10;
+
     private final MemberService memberService;
     private final PlanService planService;
     private final com.meridian.claims.util.PaginationConfig paginationConfig;
+    private final EligibilityCheckService eligibilityCheckService;
+    private final AuthenticationService authService;
 
     @Autowired
     public MemberController(MemberService memberService, PlanService planService,
-                            com.meridian.claims.util.PaginationConfig paginationConfig) {
+                            com.meridian.claims.util.PaginationConfig paginationConfig,
+                            EligibilityCheckService eligibilityCheckService, AuthenticationService authService) {
         this.memberService = memberService;
         this.planService = planService;
         this.paginationConfig = paginationConfig;
+        this.eligibilityCheckService = eligibilityCheckService;
+        this.authService = authService;
     }
 
     @RequestMapping(method = RequestMethod.GET)
@@ -87,6 +99,8 @@ public class MemberController {
         model.addAttribute("coverageRecords", memberService.getCoverageRecords(id));
         model.addAttribute("plans", planService.listAllActive());
         model.addAttribute("coverageOrders", new String[]{"PRIMARY", "SECONDARY"});
+        model.addAttribute("eligibilityChecks",
+            eligibilityCheckService.findRecentByMember(id, ELIGIBILITY_HISTORY_LIMIT));
         return "members/view";
     }
 
@@ -180,6 +194,29 @@ public class MemberController {
             RedirectAttributes redirectAttrs) {
         memberService.removeCoverage(coverageId);
         redirectAttrs.addFlashAttribute("success", "Coverage record removed.");
+        return "redirect:/members/" + memberId;
+    }
+
+    // --- Real-time eligibility check (Phase 16) ---
+
+    @RequestMapping(value = "/{id}/eligibility/check", method = RequestMethod.POST)
+    public String checkEligibility(
+            @PathVariable("id") int memberId,
+            @RequestParam(value = "providerId", required = false) Integer providerId,
+            @RequestParam(value = "serviceType", defaultValue = "30") String serviceType,
+            HttpServletRequest httpReq,
+            RedirectAttributes redirectAttrs) {
+        User currentUser = authService.getCurrentUser(httpReq);
+        EligibilityCheck check = eligibilityCheckService.checkEligibility(
+            memberId, providerId, serviceType, currentUser != null ? currentUser.getId() : null);
+        if (EligibilityCheck.STATUS_ACTIVE.equals(check.getResultStatus())) {
+            redirectAttrs.addFlashAttribute("success", "Eligibility check complete: coverage is ACTIVE.");
+        } else if (EligibilityCheck.STATUS_INACTIVE.equals(check.getResultStatus())) {
+            redirectAttrs.addFlashAttribute("error", "Eligibility check complete: coverage is INACTIVE.");
+        } else {
+            redirectAttrs.addFlashAttribute("error", "Eligibility check could not be completed: "
+                + check.getCoverageSnapshot());
+        }
         return "redirect:/members/" + memberId;
     }
 }

@@ -111,6 +111,9 @@ and a valid `claims.intake.path` is configured.
 | `claims.intake.rejected.path` | _(empty)_ | Files that fail at the file level moved here; defaults to `<intake.path>/rejected/` |
 | `claims.intake.system-user-id` | `0` | DB id of the `system` user; `0` triggers a lookup by username. Seeded by V12 migration. |
 | `claims.intake.edi.extensions` | `edi,x12,837` | Comma-separated file extensions routed to the X12 EDI 837 parser (case-insensitive) |
+| `claims.intake.status-inquiry.extensions` | `276` | Comma-separated file extensions routed to the X12 276 claim-status inquiry handler (case-insensitive) — checked *before* the 837/FHIR dispatch above; see Phase 14 below |
+| `claims.intake.prior-auth.extensions` | `278` | Comma-separated file extensions routed to the X12 278 prior-authorization request handler (case-insensitive) — also checked ahead of the claim-submission dispatch; see Phase 15 below |
+| `claims.intake.enrollment.extensions` | `834` | Comma-separated file extensions routed to the X12 834 enrollment handler (case-insensitive) — checked after the `.276`/`.278` checks and ahead of the claim-submission dispatch; see Phase 17 below |
 | `claims.jobs.intake.cron` | `0 0/5 * * * ?` | Quartz cron — every 5 minutes |
 
 **Supported inbound formats:**
@@ -120,6 +123,47 @@ and a valid `claims.intake.path` is configured.
 
 Both formats converge on the same `ClaimService.submit` pipeline after parsing. Files with unrecognised extensions are skipped with a warning.
 
+## Claim status inquiry (`application.properties`) — Phase 14
+
+A `.276` file is a **read-only query**, not a claim submission — it never reaches
+`ClaimService.submit`. Both pollers recognise it (via `claims.intake.status-inquiry.extensions`)
+ahead of the claim-submission dispatch above, resolve the claim (by its own claim number if the
+inquiry carries `REF*1K`, else by member+provider+date-of-service), and generate an X12 277
+response — logged to `edi_transactions` and, for a trading-partner-submitted inquiry, delivered
+back through that partner's own outbound transport. No separate enable flag; it activates
+automatically wherever a `.276` file is dropped once intake is running.
+
+## Prior authorization request (`application.properties`) — Phase 15
+
+A `.278` file is checked next (via `claims.intake.prior-auth.extensions`), after the `.276`
+check and before claim-submission dispatch. Unlike a status inquiry, a **certified** request
+does mutate state — it creates a real `ACTIVE` row in `prior_authorizations` via the same
+`PriorAuthorizationService.createAuthorization` staff use manually. A request that fails
+validation (unknown member/provider, invalid procedure code, missing/invalid requested
+certification period) is denied and creates nothing. Either way an X12 278 response is
+generated and logged to `edi_transactions`, delivered back through the partner's transport
+when applicable. No separate enable flag.
+
+## Real-time eligibility check (Phase 16)
+
+No `application.properties` keys — this is a member-screen action ("Check Eligibility" on the
+member-detail page), not a poller or a config-gated feature. It always runs against
+`MockEligibilityClient`, the dev-safe default that synthesizes a 271 from the member's own
+`member_coverage` data (there is no live clearinghouse partner to configure yet). A future real
+`EligibilityClient` implementation would follow the same external-config credential pattern
+`SftpTransportAdapter` already uses, at which point a config key would gate which implementation
+is active — mirroring `claims.mail.enabled` for `MailService`.
+
+## Enrollment ingestion (`application.properties`) — Phase 17
+
+A `.834` file is checked next (via `claims.intake.enrollment.extensions`), after the `.276` and
+`.278` checks and before claim-submission dispatch. Unlike a status inquiry, it mutates member
+and coverage data directly through `MemberService`: an Add (INS03 `021`) creates the member and,
+if a plan resolves, a PRIMARY coverage record; a Termination (`024`) stamps a termination date
+on the matching open-ended coverage record; a Change (`001`) updates demographics only. Like
+batch claim intake, this has its own file-level SHA-256 idempotency ledger
+(`enrollment_batches`) — re-dropping the same file is a no-op. No separate enable flag.
+
 ## Remittance EDI output (`application.properties`)
 
 | Key | Default | Notes |
@@ -127,12 +171,58 @@ Both formats converge on the same `ClaimService.submit` pipeline after parsing. 
 | `claims.remittance.edi.output.path` | _(empty)_ | If set, generated 835 remittance files are also written to this directory as `remittance-{id}.835`. Empty = download-only (no file written to disk). |
 | `claims.remittance.edi.production` | `false` | X12 `ISA15` usage indicator. `false` → `T` (test); `true` → `P` (production). **Set to `true` in the prod overlay** so live clearinghouses receive production-flagged 835 files. Leave `false` in dev/staging. |
 
+## EFT/ACH payment issuance (`application.properties`) — Phase 18
+
+Runs automatically when a payment batch is exported — no separate enable flag. Providers with
+ACH banking info configured (on their detail screen) get paid via a NACHA ACH file instead of
+check; providers without it are skipped, not blocked. `claims.eft.origin.*` identify Meridian
+itself as the ACH originator and **must be set to real values in the prod overlay** before a
+live ODFI relationship goes live — the defaults below are structurally valid but non-routable,
+safe for dev.
+
+| Key | Default | Notes |
+| --- | ------- | ----- |
+| `claims.eft.origin.routing-number` | `123456789` | Meridian's own 9-digit ODFI routing number (ACH file header/batch header). |
+| `claims.eft.origin.name` | `MERIDIAN CLAIMS` | Originating institution/company display name (ACH file header + batch header). |
+| `claims.eft.company.id` | `1234567890` | 10-character company identification (ACH batch header + batch control). |
+| `claims.eft.output.path` | _(empty)_ | If set, generated ACH files are also written to this directory as `eft-{paymentBatchId}.ach`. Empty = generated on demand and referenced from `eft_payments` only, no file written — same convention as `claims.remittance.edi.output.path`. |
+
+## EDI acknowledgments (`application.properties`) — Phase 12
+
+Every inbound X12 837 file gets a TA1 (structurally invalid interchange), 999 (functional
+acknowledgment), and 277CA (claim-level acknowledgment), generated automatically inside
+`IntakeService.processFile` — no separate job. Every inbound/outbound EDI interchange is
+logged to `edi_transactions` (see [data-model.md](data-model.md)), viewable read-only at
+**Admin → Integrations**.
+
+| Key | Default | Notes |
+| --- | ------- | ----- |
+| `claims.integration.edi.output.path` | _(empty)_ | If set, generated 999/277CA/TA1 files are also written to this directory. Empty = generated and logged to `edi_transactions.detail` only, no file written. |
+| `claims.integration.edi.production` | `false` | X12 `ISA15` usage indicator for outbound acknowledgments — same convention as `claims.remittance.edi.production`, set independently. |
+
+## Trading-partner transport (`application.properties`) — Phase 13
+
+Trading partners themselves are admin-managed data (**Admin → Trading Partners**), not
+properties — see [data-model.md](data-model.md) `trading_partners`. Only the poller cadence
+and SFTP credentials are configuration:
+
+| Key | Default | Notes |
+| --- | ------- | ----- |
+| `claims.jobs.trading-partner.cron` | `0 0/10 * * * ?` | Quartz cron — every 10 minutes; polls all active trading partners |
+| `claims.transport.credential.<ref>` | _(unset)_ | SFTP password for a partner whose `transport_credential_ref` equals `<ref>`. **Set only in the prod overlay** — never a literal in `application.properties` or the DB. A partner with `transport_type=SFTP` and no matching key fails cleanly (`TransportException`, not a silent skip). |
+
+`transport_type=LOCAL` (the default) needs no credential — it polls a local directory pair
+(`inbound_path`/`outbound_path` on the trading partner record) exactly like the Phase 9
+poller, just partner-scoped.
+
 ## Credentials — never in source
 
 DB credentials (`jdbc.username`, `jdbc.password`) come from environment variables in prod.
-SMTP credentials (`claims.mail.smtp.username`, `claims.mail.smtp.password`) should also be
-set via the prod overlay (which itself lives outside the WAR) rather than committed to source.
-No secret should ever appear in a file under `src/`.
+SMTP credentials (`claims.mail.smtp.username`, `claims.mail.smtp.password`) and SFTP
+trading-partner credentials (`claims.transport.credential.*`) should also be set via the prod
+overlay (which itself lives outside the WAR) rather than committed to source. No secret should
+ever appear in a file under `src/`, and no secret is ever stored in the `trading_partners`
+table — only a `transport_credential_ref` key name.
 
 ## Related
 

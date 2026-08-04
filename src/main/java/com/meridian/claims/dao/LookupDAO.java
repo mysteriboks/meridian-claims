@@ -1,5 +1,6 @@
 package com.meridian.claims.dao;
 
+import com.meridian.claims.model.CarcRarcCode;
 import com.meridian.claims.model.DenialReasonCode;
 import com.meridian.claims.model.DiagnosisCode;
 import com.meridian.claims.model.ProcedureCode;
@@ -32,4 +33,10 @@ public interface LookupDAO {
     ServiceTypeCategory findServiceTypeCategory(String code);
     void insertServiceTypeCategory(ServiceTypeCategory c);
     void updateServiceTypeCategory(ServiceTypeCategory c);
+
+    // --- CARC/RARC Codes (Phase 19 — the official X12 external code list) ---
+    List<CarcRarcCode> findAllCarcRarcCodes();
+    CarcRarcCode findCarcRarcCode(String code);
+    void insertCarcRarcCode(CarcRarcCode c);
+    void updateCarcRarcCode(CarcRarcCode c);
 }

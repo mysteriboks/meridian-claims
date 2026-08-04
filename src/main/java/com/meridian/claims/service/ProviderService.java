@@ -5,6 +5,7 @@ import com.meridian.claims.model.NetworkStatus;
 import com.meridian.claims.model.Provider;
 import com.meridian.claims.model.ProviderType;
 import com.meridian.claims.util.Page;
+import com.meridian.claims.util.ValidationUtil;
 import org.apache.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -99,6 +100,36 @@ public class ProviderService {
         p.setPhone(phone);
         p.setAddress(address);
         providerDAO.update(p);
+    }
+
+    /**
+     * Sets or clears a provider's ACH disbursement banking details (Phase 18).
+     * Passing all three args blank/null clears the provider's banking info —
+     * that provider is then simply skipped (not failed) when an EFT/ACH batch
+     * file is generated, the same "missing config is inert, not fatal" pattern
+     * {@code TransportAdapterResolver} uses for an unconfigured trading partner.
+     */
+    @Transactional
+    public void updateBankingInfo(int id, String routingNumber, String accountNumber, String accountType) {
+        findById(id);
+        boolean anyProvided = ValidationUtil.required(routingNumber)
+            || ValidationUtil.required(accountNumber) || ValidationUtil.required(accountType);
+        if (!anyProvided) {
+            providerDAO.updateBankingInfo(id, null, null, null);
+            auditService.record("PROVIDER_BANKING_CLEARED", "PROVIDER", (long) id, "Cleared ACH banking info");
+            return;
+        }
+        if (!ValidationUtil.achRoutingNumber(routingNumber)) {
+            throw new ServiceException("ACH routing number must be exactly 9 digits");
+        }
+        if (!ValidationUtil.required(accountNumber)) {
+            throw new ServiceException("ACH account number is required");
+        }
+        if (!"CHECKING".equals(accountType) && !"SAVINGS".equals(accountType)) {
+            throw new ServiceException("ACH account type must be CHECKING or SAVINGS");
+        }
+        providerDAO.updateBankingInfo(id, routingNumber.trim(), accountNumber.trim(), accountType);
+        auditService.record("PROVIDER_BANKING_UPDATED", "PROVIDER", (long) id, "Updated ACH banking info");
     }
 
     @Transactional

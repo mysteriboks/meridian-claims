@@ -71,6 +71,9 @@ public class AdjudicationService {
     @Value("${claims.auto.approve.threshold:500.00}")
     private String autoApproveThresholdStr;
 
+    // Parsed once on first use — the raw @Value string is injected after construction.
+    private BigDecimal autoApproveThreshold;
+
     @Autowired private ClaimDAO claimDAO;
     @Autowired private ClaimLineItemDAO claimLineItemDAO;
     @Autowired private FeeScheduleRateDAO feeScheduleRateDAO;
@@ -216,11 +219,17 @@ public class AdjudicationService {
                 totalPlanPaid = Money.add(totalPlanPaid, item.getPlanPaidAmount());
             }
         }
-        BigDecimal threshold = Money.of(autoApproveThresholdStr);
-        if (totalPlanPaid.compareTo(threshold) > 0) {
+        if (totalPlanPaid.compareTo(autoApproveThreshold()) > 0) {
             return ClaimStatus.IN_REVIEW;
         }
         return ClaimStatus.APPROVED;
+    }
+
+    private BigDecimal autoApproveThreshold() {
+        if (autoApproveThreshold == null) {
+            autoApproveThreshold = Money.of(autoApproveThresholdStr);
+        }
+        return autoApproveThreshold;
     }
 
     private List<AdjudicationRule> buildRuleChain(List<ProcedureCode> procedureCodes) {

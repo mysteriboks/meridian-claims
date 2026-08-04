@@ -618,6 +618,84 @@ public class ClaimServiceTest {
     }
 
     @Test
+    public void deny_reversesAccumulatorContribution_whenPresent() {
+        // A claim routed to IN_REVIEW during adjudication has already contributed to the member's
+        // deductible/OOP accumulators. Denying it must reverse that contribution.
+        Claim claim = inReviewClaim(20);
+        Mockito.when(claimDAO.findById(20)).thenReturn(claim);
+
+        Plan plan = new Plan();
+        plan.setId(1);
+        plan.setBenefitYearStart(date(2026, 1, 1));
+        Mockito.when(planDAO.findById(1)).thenReturn(plan);
+
+        com.meridian.claims.model.ClaimAccumulatorContribution prior =
+            new com.meridian.claims.model.ClaimAccumulatorContribution();
+        prior.setClaimId(20);
+        prior.setReversed(false);
+        Mockito.when(contributionDAO.findByClaimId(20)).thenReturn(prior);
+
+        claimService.deny(20, 99, "NOT_COVERED", "Service not covered");
+
+        Mockito.verify(voidReversalService).reverse(20, 10, 1, date(2026, 1, 1));
+        Mockito.verify(claimDAO).update(Mockito.any(Claim.class));
+    }
+
+    @Test
+    public void deny_doesNotReverse_whenNoContributionOrAlreadyReversed() {
+        Claim claim = inReviewClaim(20);
+        Mockito.when(claimDAO.findById(20)).thenReturn(claim);
+        com.meridian.claims.model.ClaimAccumulatorContribution reversed =
+            new com.meridian.claims.model.ClaimAccumulatorContribution();
+        reversed.setClaimId(20);
+        reversed.setReversed(true);
+        Mockito.when(contributionDAO.findByClaimId(20)).thenReturn(reversed);
+
+        claimService.deny(20, 99, "NOT_COVERED", "Service not covered");
+
+        Mockito.verify(voidReversalService, Mockito.never())
+            .reverse(Mockito.anyInt(), Mockito.anyInt(), Mockito.anyInt(), Mockito.any(Date.class));
+    }
+
+    @Test
+    public void markAbandoned_reversesContributionAndTransitions() {
+        Claim claim = new Claim();
+        claim.setId(40);
+        claim.setMemberId(10);
+        claim.setPlanId(1);
+        claim.setStatus(ClaimStatus.PENDING_INFO);
+        claim.setVersion(3);
+        Mockito.when(claimDAO.findById(40)).thenReturn(claim);
+
+        Plan plan = new Plan();
+        plan.setId(1);
+        plan.setBenefitYearStart(date(2026, 1, 1));
+        Mockito.when(planDAO.findById(1)).thenReturn(plan);
+
+        com.meridian.claims.model.ClaimAccumulatorContribution prior =
+            new com.meridian.claims.model.ClaimAccumulatorContribution();
+        prior.setClaimId(40);
+        prior.setReversed(false);
+        Mockito.when(contributionDAO.findByClaimId(40)).thenReturn(prior);
+
+        claimService.markAbandoned(40, "Stale: PENDING_INFO past info_request due_date");
+
+        Mockito.verify(voidReversalService).reverse(40, 10, 1, date(2026, 1, 1));
+        Mockito.verify(claimDAO).updateStatus(40, "ABANDONED", 3);
+        Mockito.verify(claimAuditDAO).insert(Mockito.any(com.meridian.claims.model.ClaimAuditEntry.class));
+    }
+
+    @Test(expected = ServiceException.class)
+    public void markAbandoned_illegalFromTerminalState_throws() {
+        Claim claim = new Claim();
+        claim.setId(41);
+        claim.setStatus(ClaimStatus.PAID);   // PAID → ABANDONED is not a legal transition
+        claim.setVersion(1);
+        Mockito.when(claimDAO.findById(41)).thenReturn(claim);
+        claimService.markAbandoned(41, "Stale");
+    }
+
+    @Test
     public void requestInfo_happyPath_insertsInfoRequestAndTransitions() {
         Claim claim = inReviewClaim(30);
         Mockito.when(claimDAO.findById(30)).thenReturn(claim);

@@ -40,6 +40,11 @@ public class PlanService {
         return p;
     }
 
+    /** Case-insensitive exact match on plan name. Returns null (not an exception) when not found — callers decide how to handle an unresolved plan. */
+    public Plan findByPlanName(String planName) {
+        return planDAO.findByName(planName);
+    }
+
     public Page<Plan> listAll(int pageNumber, int pageSize) {
         int page = pageNumber < 1 ? 1 : pageNumber;
         int size = pageSize < 1 ? 20 : pageSize;

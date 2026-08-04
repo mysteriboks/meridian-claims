@@ -60,4 +60,14 @@ public final class LogMaskUtil {
         Matcher m = DOB_PATTERN.matcher(message);
         return m.replaceAll("****-**-**");
     }
+
+    /**
+     * Combined mask for operator-facing intake/quarantine messages, applying both
+     * DOB and member-number masking before the message reaches logs or audit —
+     * the single home for a composition every batch intake service needs
+     * ({@code IntakeService}, {@code EnrollmentIntakeService}).
+     */
+    public static String maskPhi(String message) {
+        return maskMemberNumber(maskDobsInMessage(message));
+    }
 }

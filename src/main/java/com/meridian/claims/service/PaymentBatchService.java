@@ -9,6 +9,7 @@ import com.meridian.claims.model.ClaimStatus;
 import com.meridian.claims.model.Payment;
 import com.meridian.claims.model.PaymentBatch;
 import com.meridian.claims.model.Provider;
+import com.meridian.claims.model.RemittanceBatch;
 import com.meridian.claims.util.CsvWriter;
 import com.meridian.claims.util.Money;
 import org.apache.log4j.Logger;
@@ -33,6 +34,7 @@ public class PaymentBatchService {
     @Autowired private ClaimService claimService;
     @Autowired private SubrogationService subrogationService;
     @Autowired private RemittanceService remittanceService;
+    @Autowired private EftPaymentService eftPaymentService;
     @Autowired private AuditService auditService;
 
     /**
@@ -124,7 +126,12 @@ public class PaymentBatchService {
 
         // Generate provider remittance advice simultaneously (PHASES.md Phase 6 / reuses Phase 5)
         if (!paymentIds.isEmpty()) {
-            remittanceService.generateBatch(paymentIds, batch.getBatchDate());
+            RemittanceBatch remittanceBatch = remittanceService.generateBatch(paymentIds, batch.getBatchDate());
+            // Phase 18: issue electronic payment (NACHA ACH) for any provider with banking info
+            // configured; providers without it are simply skipped, so the batch stays partially
+            // check-paid rather than blocking the export.
+            eftPaymentService.generateForBatch(batch, remittanceBatch,
+                remittanceService.findItemsByBatchId(remittanceBatch.getId()));
         }
 
         auditService.record("BATCH_EXPORTED", "PAYMENT_BATCH", (long) batchId,

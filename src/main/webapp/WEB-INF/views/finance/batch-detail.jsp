@@ -32,6 +32,37 @@
         <tr><td style="color:#6b7888">File Reference</td><td><c:out value="${batch.fileReference}"/></td></tr>
     </table>
 
+    <h2 class="section-heading">Electronic Payment (EFT/ACH)</h2>
+    <c:choose>
+        <c:when test="${not empty eftPayment}">
+            <table class="data-table" style="max-width:500px">
+                <tr><td style="color:#6b7888;width:160px">Status</td><td><span class="badge badge-${eftPayment.settlementStatus == 'SETTLED' ? 'active' : 'pending'}"><c:out value="${eftPayment.settlementStatus}"/></span></td></tr>
+                <tr><td style="color:#6b7888">ACH Amount</td><td>$<c:out value="${eftPayment.amount}"/></td></tr>
+                <tr><td style="color:#6b7888">TRN Reassociation #</td><td><c:out value="${eftPayment.trnReassociationNumber}"/></td></tr>
+                <tr><td style="color:#6b7888">Providers Paid</td><td><c:out value="${eftPayment.entryCount}"/></td></tr>
+                <tr><td style="color:#6b7888">Providers Skipped</td><td><c:out value="${eftPayment.skippedProviderCount}"/> (no banking info configured)</td></tr>
+            </table>
+            <div style="display:flex;gap:8px;margin-top:12px">
+                <a class="btn" href="${pageContext.request.contextPath}/finance/batches/${batch.id}/ach">Download ACH File</a>
+                <c:if test="${eftPayment.settlementStatus != 'SETTLED'}">
+                    <form method="post" action="${pageContext.request.contextPath}/finance/batches/${batch.id}/eft/settle" style="display:inline">
+                        <input type="hidden" name="_csrf" value="${_csrf}">
+                        <button type="submit" class="btn btn-primary" onclick="return confirm('Confirm the bank has settled this ACH batch?')">Mark Settled</button>
+                    </form>
+                </c:if>
+            </div>
+        </c:when>
+        <c:when test="${batch.status == 'EXPORTED'}">
+            <p style="color:#6b7888;font-size:13px">
+                No providers in this batch have ACH banking info configured — the batch was exported check-paid only.
+                Configure a provider's banking info on its detail screen, then export a future batch electronically.
+            </p>
+        </c:when>
+        <c:otherwise>
+            <p style="color:#6b7888;font-size:13px">Generated when this batch is exported.</p>
+        </c:otherwise>
+    </c:choose>
+
     <c:if test="${not empty csvContent}">
     <h2 class="section-heading">CSV Preview</h2>
     <pre style="background:#f5f7fa;padding:12px;border-radius:4px;overflow:auto;font-size:12px"><c:out value="${csvContent}"/></pre>

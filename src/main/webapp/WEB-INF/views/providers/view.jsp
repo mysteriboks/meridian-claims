@@ -19,6 +19,10 @@
             &nbsp;<span class="badge ${provider.networkStatus == 'IN_NETWORK' ? 'badge-in-network' : 'badge-out-network'}">
                 <c:out value="${provider.networkStatus}"/>
             </span>
+            &nbsp;<span class="badge ${provider.npiValidationStatus == 'VALID' ? 'badge-active' : (provider.npiValidationStatus == 'INVALID' ? 'badge-inactive' : 'badge-terminated')}"
+                        title="Most recent NPPES check result (Phase 19)">
+                NPI <c:out value="${provider.npiValidationStatus}"/>
+            </span>
         </div>
         <div style="display:flex;gap:8px">
             <a class="btn" href="${pageContext.request.contextPath}/providers/${provider.id}/edit">Edit</a>
@@ -37,6 +41,39 @@
         <tr><td style="color:#6b7888">Phone</td><td><c:out value="${provider.phone}"/></td></tr>
         <tr><td style="color:#6b7888">Address</td><td><c:out value="${provider.address}"/></td></tr>
     </table>
+
+    <h2 class="section-heading">Direct Deposit (ACH) Banking Info</h2>
+    <c:choose>
+        <c:when test="${not empty provider.achRoutingNumber}">
+            <p style="color:#6b7888;font-size:13px">
+                Routing <c:out value="${provider.achRoutingNumber}"/> &middot;
+                Account <c:out value="${maskedAchAccountNumber}"/>
+                (<c:out value="${provider.achAccountType}"/>) — configured for electronic (ACH) payment batches.
+            </p>
+        </c:when>
+        <c:otherwise>
+            <p style="color:#6b7888;font-size:13px">Not configured — this provider is skipped (paid by other means) when an EFT/ACH batch file is generated.</p>
+        </c:otherwise>
+    </c:choose>
+    <form method="post" action="${pageContext.request.contextPath}/providers/${provider.id}/banking" style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        <input type="hidden" name="_csrf" value="${_csrf}">
+        <div class="form-group" style="margin:0">
+            <label>Routing Number</label>
+            <input type="text" name="achRoutingNumber" maxlength="9" pattern="\d{9}" placeholder="9 digits" style="width:140px">
+        </div>
+        <div class="form-group" style="margin:0">
+            <label>Account Number</label>
+            <input type="text" name="achAccountNumber" maxlength="17" style="width:180px">
+        </div>
+        <div class="form-group" style="margin:0">
+            <label>Account Type</label>
+            <select name="achAccountType">
+                <option value="CHECKING">CHECKING</option>
+                <option value="SAVINGS">SAVINGS</option>
+            </select>
+        </div>
+        <button type="submit" class="btn">Save Banking Info</button>
+    </form>
 
     <p style="margin-top:20px"><a href="${pageContext.request.contextPath}/providers">&larr; Back to Providers</a></p>
 </div>

@@ -390,7 +390,8 @@ records processed).
 | `BenefitYearRolloverJob`     | Nightly 03:00    | Log prior-year accumulator anomalies                   |
 | `SlowQueryReportJob`         | Nightly 04:00    | Email DBA slow queries from pg_stat_statements         |
 | `ClaimArchiveJob`            | Nightly 01:00    | Move terminal claims past retention to claims_archive  |
-| `InboundClaimFilePollerJob`  | Every 5 min      | Poll inbound dir; parse FHIR/EDI files; submit claims  |
+| `InboundClaimFilePollerJob`  | Every 5 min      | Poll shared inbound dir; parse FHIR/EDI files; submit claims |
+| `TradingPartnerPollerJob`    | Every 10 min     | Poll each active trading partner's own transport; submit claims; deliver acks back to that partner |
 
 Cron expressions are all overridable via properties (see [configuration.md](configuration.md)).
 
@@ -404,10 +405,11 @@ exceptions surface in the existing reviewer worklist.
 
 ### Design principles
 
-- **Single adjudication path** — `InboundClaimFilePollerJob` → `IntakeService` →
-  `ClaimService.submit()` → `AdjudicationService`. No parallel code path.
+- **Single adjudication path** — either poller → `IntakeService` → `ClaimService.submit()` →
+  `AdjudicationService`. No parallel code path.
 - **Parser seam** — `ClaimFileParser` interface decouples format parsing from the pipeline.
-  New formats plug in by implementing this interface; nothing else changes.
+  New formats plug in by implementing this interface; nothing else changes. Extension→parser
+  dispatch is a single shared `ParserResolver`, used by both pollers.
 - **Per-record fault isolation** — one malformed record is quarantined individually; the
   rest of the file continues processing. Only a structurally unparseable file (bad JSON,
   unrecognised format) is a file-level failure.
@@ -416,23 +418,36 @@ exceptions surface in the existing reviewer worklist.
 - **Off-session attribution** — the job runs outside any HTTP session. `AuditService` and
   `PhiAccessLogService` write `user_id = NULL` (null-safe by design). Claims are attributed
   to the seeded `system` user (`created_by_user_id`).
+- **Transport seam** (Phase 13) — `TransportAdapter` decouples *where* a file comes from
+  (shared local directory vs. a specific trading partner's local/SFTP endpoint) from
+  everything downstream of it; `IntakeService`/`ClaimService` are unaware which poller called them.
 
 ### Component map
 
 ```
-InboundClaimFilePollerJob
-  │
-  ├── parserFor(fileName)
-  │     ├── .json  → FhirClaimFileParser   (FHIR R4 Claim JSON, single resource or Bundle)
-  │     └── .edi / .x12 / .837 → X12Edi837Parser  (X12 837P professional / 837I institutional)
-  │
-  └── IntakeService.processFile(fileName, content, parser)
-        ├── SHA-256 hash → claim_intake_batches (idempotency check)
-        ├── parser.parse(content) → ClaimFileParseResult
-        │     ├── getClaims()        — successfully parsed SubmitClaimRequests
-        │     └── getRecordErrors()  — per-record failures (quarantined, not thrown)
-        ├── ClaimService.submit(req, systemUserId)  [one per good record]
-        └── update claim_intake_batches (COMPLETED / FAILED + counts)
+InboundClaimFilePollerJob (shared directory)      TradingPartnerPollerJob (per active partner)
+  │                                                  │
+  │  reads claims.intake.path directly               │  TransportAdapterResolver.resolve(partner)
+  │                                                  │    ├── LocalDirectoryTransportAdapter (default)
+  │                                                  │    └── SftpTransportAdapter (JSch)
+  │                                                  │
+  └──────────────────┬───────────────────────────────┘
+                      │
+              ParserResolver.resolve(fileName)
+                ├── .json  → FhirClaimFileParser   (FHIR R4 Claim JSON, single resource or Bundle)
+                └── .edi / .x12 / .837 → X12Edi837Parser  (X12 837P professional / 837I institutional)
+                      │
+              IntakeService.processFile(fileName, content, parser[, tradingPartnerId])
+                ├── SHA-256 hash → claim_intake_batches (idempotency check)
+                ├── parser.parse(content) → ClaimFileParseResult
+                │     ├── getClaims()        — successfully parsed SubmitClaimRequests
+                │     └── getRecordErrors()  — per-record failures (quarantined, not thrown)
+                ├── ClaimService.submit(req, systemUserId)  [one per good record]
+                ├── update claim_intake_batches (COMPLETED / FAILED + counts)
+                └── if X12: generate 999/277CA/TA1 → edi_transactions (tagged with tradingPartnerId)
+                      │
+              TradingPartnerPollerJob only: EdiTransactionDAO.findByFileReference(fileName)
+                → pushes each ack's content back through that partner's own outbound transport
 ```
 
 ### Supported formats
@@ -449,6 +464,119 @@ InboundClaimFilePollerJob
 ISA→GS→ST→BPR→CLP→SVC→CAS→AMT→SE→GE→IEA envelope is emitted; all amounts are
 `BigDecimal.toPlainString()`. The Finance screen exposes a "Download 835" link on each
 remittance batch detail page. Optionally writes files to disk via `claims.remittance.edi.output.path`.
+`Edi835Generator`, `Edi999Generator`, `Edi277CaGenerator`, `Edi277Generator`,
+`Edi278ResponseGenerator`, and `Edi270Generator` share their ISA/GE/IEA envelope-writing logic via `EdiEnvelopeWriter`
+(extracted during the Phase 12 duplication sweep). `Edi277CaGenerator` and `Edi277Generator`
+additionally share `EdiEnvelopeWriter.writeTrnAndStc` (Phase 14 sweep); when
+`Edi278ResponseGenerator` needed the same TRN segment but a different second segment (UM, not
+STC), `writeTrnAndStc` was split into standalone `writeTrn` + `writeStc` so all three generators
+reuse the TRN half without forcing an STC-shaped abstraction onto UM (Phase 15 sweep).
+
+### EDI acknowledgments (Phase 12)
+
+Every inbound X12 837 file automatically gets an acknowledgment, generated inline inside
+`IntakeService.processFile` — no separate job. `Edi999Generator` produces the functional
+acknowledgment (AK1/AK2/AK5/AK9, referencing the inbound file's own GS06/ST02 control numbers)
+and the TA1 interchange reject for structurally invalid interchanges; `Edi277CaGenerator`
+produces the claim-level acknowledgment (STC status per transaction, keyed to
+`claims.external_reference`/ISA13). All three are logged to `edi_transactions`, viewable at
+Admin → Integrations.
+
+### Trading-partner transport (Phase 13)
+
+`TradingPartnerPollerJob` polls every active `trading_partners` row independently of the
+shared directory poller above. Each partner has its own transport (`LOCAL` directory or
+`SFTP`, resolved by `TransportAdapterResolver`) and its own inbound/outbound paths.
+Credentials for SFTP partners are never stored on the partner record — only a
+`transport_credential_ref` key name, resolved at connect time from the external prod overlay.
+One partner's transport failure is logged and that partner skipped; it never stops the others.
+
+### Claim status inquiry (Phase 14)
+
+A `.276` file is recognised by `StatusInquiryFileMatcher` — checked by both pollers *before*
+the claim-submission dispatch above — and routed to `ClaimStatusInquiryService` instead of
+`IntakeService`. This is a read-only query: `X12Edi276Parser` extracts the inquiry (claim
+number if the submitter has it, else member+provider+date-of-service), the service resolves
+it against `claims`, and `Edi277Generator` produces the response (`stcFor(ClaimStatus)` maps
+every status to an X12 STC code). Both the inbound 276 and outbound 277 are logged to
+`edi_transactions` exactly like an 837/999 pair, so the trading-partner poller's existing
+ack-delivery step (`findByFileReference` → push through the partner's transport) handles
+delivery with no special-casing.
+
+### Prior authorization request (Phase 15)
+
+A `.278` file is recognised by `PriorAuthRequestFileMatcher` — the same seam pattern as
+`StatusInquiryFileMatcher`, checked right after it. Unlike a 276, this **does** mutate state:
+`X12Edi278Parser` extracts the request, `PriorAuthRequestService` validates and resolves it
+(member, provider, procedure code, requested certification period), and — for anything that
+certifies — calls the existing `PriorAuthorizationService.createAuthorization` directly, so a
+278-sourced authorization is created through the exact same path staff use when entering one
+manually. `Edi278ResponseGenerator` reports the outcome as a UM certification code (`A1`
+certified / `A3` not certified — no pended state, since `PriorAuthStatus` doesn't have one).
+Logged to `edi_transactions` the same way as 276/277; delivery reuses the trading-partner
+poller's existing ack-delivery step unchanged.
+
+### Real-time eligibility inquiry (Phase 16)
+
+Unlike every prior electronic transaction, Meridian is the **requester** for 270/271, not the
+responder — this is triggered by a "Check Eligibility" action on the member screen, not an
+inbound file. `EligibilityCheckService` builds the outbound request via `Edi270Generator`, sends
+it through the `EligibilityClient` seam, parses the response with `X12Edi271Parser`, maps the
+EB01 eligibility/benefit code to `ACTIVE`/`INACTIVE`/`ERROR`, and persists the result to
+`eligibility_checks` (a dedicated table, not `edi_transactions` — this is a member-scoped check
+event, not a trading-partner file exchange). `EligibilityClient`'s only implementation,
+`MockEligibilityClient`, is the dev-safe default that plays the same role
+`LoggingMailService` plays for `MailService`: no live clearinghouse partner exists yet, so it
+synthesizes a realistic 271 from the member's own `member_coverage` rows
+(`MemberCoverageDAO.findActiveByMemberId` + `MemberCoverage.isActiveOn(now)`) instead of calling
+out anywhere. The member-detail screen (`members/view.jsp`) shows the last 10 checks in an
+"Eligibility Check History" panel.
+
+### Enrollment ingestion (Phase 17)
+
+A `.834` file is recognised by `EnrollmentFileMatcher` — checked by both pollers after the 276
+and 278 checks, ahead of the claim-submission dispatch. `X12Edi834Parser` extracts one
+`EnrollmentRecord` per INS loop (a file may enroll many members in one transaction).
+`EnrollmentIntakeService` dispatches by X12 834 maintenance type code: **021 (Add)** creates the
+member via `MemberService.createMember` if not already known, then adds a PRIMARY coverage
+record via `MemberService.addCoverage` when the file carries a resolvable plan (`PlanDAO.findByName`
+against HD04) and effective date; **024 (Termination)** finds the member's open-ended coverage
+record matching the file's plan and stamps a termination date via `MemberService.updateCoverage`;
+**001 (Change)** updates only member demographics via `MemberService.updateMember`, preserving
+address/phone/email — coverage changes arrive in practice as a paired 024 (end old) + 021 (start
+new), so Change deliberately never touches coverage. Like Phase 9's claim intake, this has its
+own file-level SHA-256 idempotency ledger (`enrollment_batches`) since a redundant enrollment
+file must be a safe no-op, not a duplicate member or coverage row. Unlike every prior ancillary
+transaction type, an 834 has no response document — enrollment is one-way — so the
+trading-partner poller's ack-delivery step is skipped for it entirely.
+
+### EFT/ACH payment issuance (Phase 18)
+
+Triggered automatically when a payment batch is exported (`PaymentBatchService.exportCsv`), right
+alongside the existing 835 remittance generation — not a separate user action. `EftPaymentService`
+groups the batch's `RemittanceBatchItem`s by provider (`providerId`, already captured on each
+item), sums the plan-paid amount per provider, and builds one NACHA credit entry per provider
+that has ACH banking info configured (`providers.ach_routing_number`/`ach_account_number`/
+`ach_account_type`). A provider with none configured is simply **skipped** — not fatal — so a
+batch with a mix of configured and unconfigured providers issues a partial ACH file and stays
+check-paid for the rest, exactly as the whole batch always was before this phase. `AchFileWriter`
+(`com.meridian.claims.util`) builds the actual fixed-width NACHA CCD+ file: File Header, Batch
+Header, one Entry Detail + Addenda record (carrying the TRN reassociation number) per provider,
+Batch Control, File Control, padded to a multiple of 10 records with `9`-filler lines — with real
+position-accurate control totals (entry hash, credit total, entry/addenda count), not just a
+plausible-looking format.
+
+The TRN reassociation number (`"EFT" + zero-padded payment-batch id`) is stamped on **both** the
+ACH addenda record and the paired 835's TRN02 segment — `Edi835Generator` gained a 3-arg overload
+for this; the original 2-arg signature still exists and delegates with `null`, so every
+check-paid batch generates its 835 exactly as before. When a reassociation number is present, the
+835's BPR04 payment-method code also switches from `CHK` to `ACH`, so the remittance advice itself
+reflects how the provider was actually paid. The result — TRN, amount, entry/skipped-provider
+counts, and a manually-tracked settlement status (no live bank feed exists to detect it
+automatically) — is recorded in `eft_payments`, one row per payment batch. The Finance batch
+detail screen exposes a **Download ACH File** link (regenerated on demand from the persisted TRN
+and current provider banking data — no raw NACHA text is stored in the DB, the same on-demand
+pattern the existing "Download 835" link already used) and a **Mark Settled** button.
 
 ---
 

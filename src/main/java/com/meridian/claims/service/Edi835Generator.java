@@ -18,7 +18,6 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
 
@@ -65,8 +64,20 @@ public class Edi835Generator {
      * @throws ServiceException if EDI generation fails
      */
     public String generate(RemittanceBatch batch, List<RemittanceBatchItem> items) {
+        return generate(batch, items, null);
+    }
+
+    /**
+     * Generates an X12 835 EDI string, stamping TRN02 with {@code trnReassociationNumber}
+     * when provided (Phase 18) — the same value written to the paired NACHA ACH file's
+     * addenda record via {@link com.meridian.claims.util.AchFileWriter}, letting a
+     * provider match the electronic deposit back to this remittance advice. Falls back
+     * to the plain batch id (prior behavior) when null, e.g. for a batch that was paid
+     * by check rather than ACH.
+     */
+    public String generate(RemittanceBatch batch, List<RemittanceBatchItem> items, String trnReassociationNumber) {
         try {
-            String edi = buildEdi(batch, items);
+            String edi = buildEdi(batch, items, trnReassociationNumber);
             persistToDisk(batch.getId(), edi);
             return edi;
         } catch (EDIStreamException e) {
@@ -82,7 +93,7 @@ public class Edi835Generator {
     // EDI construction
     // -------------------------------------------------------------------------
 
-    private String buildEdi(RemittanceBatch batch, List<RemittanceBatchItem> items)
+    private String buildEdi(RemittanceBatch batch, List<RemittanceBatchItem> items, String trnReassociationNumber)
             throws EDIStreamException, IOException {
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -90,9 +101,9 @@ public class Edi835Generator {
         EDIStreamWriter writer = factory.createEDIStreamWriter(baos);
 
         Date now = new Date();
-        String dateYyyyMmDd = fmt(now, "yyyyMMdd");
-        String dateYyMmDd   = fmt(now, "yyMMdd");
-        String timeHhMm     = fmt(now, "HHmm");
+        String dateYyyyMmDd = EdiEnvelopeWriter.fmt(now, "yyyyMMdd");
+        String dateYyMmDd   = EdiEnvelopeWriter.fmt(now, "yyMMdd");
+        String timeHhMm     = EdiEnvelopeWriter.fmt(now, "HHmm");
         String batchIdPadded = String.format("%09d", batch.getId());
         String batchIdStr    = String.valueOf(batch.getId());
 
@@ -101,26 +112,7 @@ public class Edi835Generator {
         int segmentCount = 0;
 
         writer.startInterchange();
-
-        // ----- ISA -----
-        writer.writeStartSegment("ISA");
-        writer.writeElement("00");           // ISA01 authorization info qualifier
-        writer.writeElement("          ");   // ISA02 authorization info (10 spaces)
-        writer.writeElement("00");           // ISA03 security info qualifier
-        writer.writeElement("          ");   // ISA04 security info (10 spaces)
-        writer.writeElement("ZZ");           // ISA05 interchange sender ID qualifier
-        writer.writeElement("MERIDIAN       "); // ISA06 interchange sender ID (15 chars)
-        writer.writeElement("ZZ");           // ISA07 interchange receiver ID qualifier
-        writer.writeElement("PAYER          "); // ISA08 interchange receiver ID (15 chars)
-        writer.writeElement(dateYyMmDd);     // ISA09 interchange date (yyMMdd)
-        writer.writeElement(timeHhMm);       // ISA10 interchange time (HHmm)
-        writer.writeElement("^");            // ISA11 repetition separator
-        writer.writeElement("00501");        // ISA12 interchange control version number
-        writer.writeElement(batchIdPadded);  // ISA13 interchange control number
-        writer.writeElement("0");            // ISA14 acknowledgment requested
-        writer.writeElement(productionMode ? "P" : "T"); // ISA15: P=production, T=test
-        writer.writeElement(":");            // ISA16 component element separator
-        writer.writeEndSegment();
+        EdiEnvelopeWriter.writeIsa(writer, dateYyMmDd, timeHhMm, batchIdPadded, productionMode);
 
         // ----- GS -----
         writer.writeStartSegment("GS");
@@ -144,14 +136,16 @@ public class Edi835Generator {
         // ----- BPR -----
         BigDecimal totalPaid = sumPlanPaid(items);
         String paymentDateStr = batch.getPaymentDate() != null
-            ? fmt(batch.getPaymentDate(), "yyyyMMdd")
+            ? EdiEnvelopeWriter.fmt(batch.getPaymentDate(), "yyyyMMdd")
             : dateYyyyMmDd;
+
+        boolean isAch = trnReassociationNumber != null && !trnReassociationNumber.trim().isEmpty();
 
         writer.writeStartSegment("BPR");
         writer.writeElement("I");                          // BPR01 transaction handling code
         writer.writeElement(totalPaid.toPlainString());    // BPR02 monetary amount (total paid)
         writer.writeElement("C");                          // BPR03 credit/debit flag
-        writer.writeElement("CHK");                        // BPR04 payment method code (check)
+        writer.writeElement(isAch ? "ACH" : "CHK");         // BPR04 payment method code
         writer.writeEmptyElement();                        // BPR05
         writer.writeEmptyElement();                        // BPR06
         writer.writeEmptyElement();                        // BPR07
@@ -170,7 +164,9 @@ public class Edi835Generator {
         // ----- TRN -----
         writer.writeStartSegment("TRN");
         writer.writeElement("1");            // TRN01 trace type code
-        writer.writeElement(batchIdStr);     // TRN02 reference identification (batch id)
+        // TRN02: the EFT reassociation number (Phase 18) when this batch was paid via ACH —
+        // the same value stamped on the NACHA addenda record — else the plain batch id.
+        writer.writeElement(isAch ? trnReassociationNumber : batchIdStr);
         writer.writeElement("1234567890");   // TRN03 originating company identifier
         writer.writeEndSegment();
         segmentCount++;
@@ -256,17 +252,7 @@ public class Edi835Generator {
         writer.writeElement("0001");                        // SE02 transaction set control number
         writer.writeEndSegment();
 
-        // ----- GE -----
-        writer.writeStartSegment("GE");
-        writer.writeElement("1");            // GE01 number of transaction sets included
-        writer.writeElement("1");            // GE02 group control number
-        writer.writeEndSegment();
-
-        // ----- IEA -----
-        writer.writeStartSegment("IEA");
-        writer.writeElement("1");            // IEA01 number of included functional groups
-        writer.writeElement(batchIdPadded);  // IEA02 interchange control number
-        writer.writeEndSegment();
+        EdiEnvelopeWriter.writeGeAndIea(writer, batchIdPadded);
 
         writer.endInterchange();
         writer.flush();
@@ -305,11 +291,6 @@ public class Edi835Generator {
                 + "; using item id as fallback. " + e.getMessage());
         }
         return String.valueOf(item.getId());
-    }
-
-    /** Formats a Date using the given pattern.  Thread-safe via per-call instantiation. */
-    private String fmt(Date date, String pattern) {
-        return new SimpleDateFormat(pattern).format(date);
     }
 
     /** Writes the generated EDI string to disk if {@code ediOutputPath} is configured. */

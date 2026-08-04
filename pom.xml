@@ -24,6 +24,9 @@
         <servlet.version>3.1.0</servlet.version>
         <jsp.version>2.3.3</jsp.version>
         <jstl.version>1.2</jstl.version>
+        <!-- JSR-250 annotations (@PostConstruct): in the JDK on Java 8, removed from the JDK in
+             Java 11. Declared 'provided' so the app builds on any JDK while the WAR stays lean. -->
+        <annotation.api.version>1.3.2</annotation.api.version>
         <jdbc.dbcp2.version>2.9.0</jdbc.dbcp2.version>
         <postgresql.version>42.7.3</postgresql.version>
         <flyway.version>5.2.4</flyway.version>
@@ -38,7 +41,29 @@
         <jackson.version>2.13.5</jackson.version>
         <!-- StAEDI 1.25.3 — confirmed Java 8 bytecode (0x34) -->
         <staedi.version>1.25.3</staedi.version>
+        <!-- JSch — SFTP trading-partner transport (Phase 13) -->
+        <jsch.version>0.1.55</jsch.version>
+        <!-- Apache MINA SSHD — embedded SFTP server for tests only (Phase 13) -->
+        <sshd.version>2.9.2</sshd.version>
+        <!-- SLF4J no-op binding — MINA SSHD logs through SLF4J internally and fails to
+             initialize without an slf4j-api/binding on the classpath. Test-only; the app
+             itself logs through Log4j 1.x per CLAUDE.md. -->
+        <slf4j.version>1.7.36</slf4j.version>
     </properties>
+
+    <!-- Quartz pulls slf4j-api 1.7.7 transitively; that patch predates org.slf4j.event.Level,
+         which the test-only MINA SSHD server needs to initialize its logging. Pin the whole
+         project to the newer 1.7.x patch so dependency mediation doesn't pick the older one
+         (same major/minor line, API-compatible — not a new dependency, just a version pin). -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
 
@@ -76,6 +101,15 @@
             <groupId>javax.servlet</groupId>
             <artifactId>jstl</artifactId>
             <version>${jstl.version}</version>
+        </dependency>
+
+        <!-- JSR-250 (@PostConstruct) — supplied by the JDK on Java 8 / by the container at
+             runtime, so 'provided'. Lets the Java-8-source build compile on Java 11+ JDKs too. -->
+        <dependency>
+            <groupId>javax.annotation</groupId>
+            <artifactId>javax.annotation-api</artifactId>
+            <version>${annotation.api.version}</version>
+            <scope>provided</scope>
         </dependency>
 
         <!-- Connection pool: Apache DBCP2 -->
@@ -118,6 +152,13 @@
             <groupId>io.xlate</groupId>
             <artifactId>staedi</artifactId>
             <version>${staedi.version}</version>
+        </dependency>
+
+        <!-- JSch — SFTP trading-partner transport (Phase 13 TransportAdapter seam) -->
+        <dependency>
+            <groupId>com.jcraft</groupId>
+            <artifactId>jsch</artifactId>
+            <version>${jsch.version}</version>
         </dependency>
 
         <!-- BCrypt password hashing -->
@@ -164,6 +205,27 @@
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <version>${h2.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Embedded SFTP server — test-only, exercises SftpTransportAdapter against a real
+             SFTP protocol implementation without a live trading partner (Phase 13) -->
+        <dependency>
+            <groupId>org.apache.sshd</groupId>
+            <artifactId>sshd-sftp</artifactId>
+            <version>${sshd.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.sshd</groupId>
+            <artifactId>sshd-core</artifactId>
+            <version>${sshd.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-nop</artifactId>
+            <version>${slf4j.version}</version>
             <scope>test</scope>
         </dependency>
 

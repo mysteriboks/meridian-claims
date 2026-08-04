@@ -35,7 +35,12 @@ import java.util.List;
  * throws IntakeParseException.
  *
  * Segment/element mappings (element positions are 1-based):
- *   ISA[13]           → externalReference (interchange control number)
+ *   ISA[13]           → externalReference (interchange control number); also captured on the
+ *                       parse result (Phase 12: TA1/999 interchange-level acknowledgment)
+ *   GS[6]             → functional group control number, captured on the parse result
+ *                       (Phase 12: 999 AK1 group response header)
+ *   ST[2]             → transaction set control number, captured per-record (Phase 12:
+ *                       999 AK2/AK5 and 277CA STC correlator)
  *   NM1 qualifier IL  → member: NM1[9] = member number
  *   NM1 qualifier 82  → rendering provider: NM1[9] = NPI
  *   DTP qualifier 472 → date of service: DTP[3] (yyyyMMdd or yyyy-MM-dd)
@@ -100,6 +105,7 @@ public class X12Edi837Parser implements ClaimFileParser {
             throws Exception {
         // Mutable state across all transactions in this interchange.
         String isaControlNumber = null;
+        String gsControlNumber = null;
 
         // Per-segment tracking.
         String currentSegment = null;
@@ -161,11 +167,11 @@ public class X12Edi837Parser implements ClaimFileParser {
                     if (tx != null) {
                         try {
                             SubmitClaimRequest req = buildRequest(tx, txIndex);
-                            result.addClaim(req);
+                            result.addClaim(req, tx.stControlNumber);
                         } catch (IntakeParseException e) {
                             LOG.warn("Record " + txIndex + " quarantined: "
                                 + com.meridian.claims.util.LogMaskUtil.maskMemberNumber(e.getMessage()));
-                            result.addRecordError(txIndex, e.getMessage());
+                            result.addRecordError(txIndex, e.getMessage(), tx.stControlNumber);
                         }
                         tx = null;
                     }
@@ -206,9 +212,16 @@ public class X12Edi837Parser implements ClaimFileParser {
                                       value, tx, isaControlNumber);
 
                     // Capture ISA13 while we are still at the interchange level
-                    // (tx is null during ISA).
+                    // (tx is null during ISA). Propagated onto the result for Phase 12
+                    // TA1/999 acknowledgment generation.
                     if ("ISA".equals(currentSegment) && elementPosition == 13 && !insideComponent) {
                         isaControlNumber = value.trim();
+                        result.setIsaControlNumber(isaControlNumber);
+                    }
+                    // Capture GS06 (functional group control number) — same rationale as ISA13.
+                    if ("GS".equals(currentSegment) && elementPosition == 6 && !insideComponent) {
+                        gsControlNumber = value.trim();
+                        result.setGsControlNumber(gsControlNumber);
                     }
                     break;
 
@@ -247,7 +260,14 @@ public class X12Edi837Parser implements ClaimFileParser {
         // All segment handling below requires an active transaction.
         if (tx == null) return;
 
-        if ("NM1".equals(seg)) {
+        if ("ST".equals(seg)) {
+            // ST02 = transaction set control number — the correlator for Phase 12
+            // 999 AK2/AK5 and 277CA STC acknowledgment segments.
+            if (elemPos == 2) {
+                tx.stControlNumber = value;
+            }
+
+        } else if ("NM1".equals(seg)) {
             handleNm1(tx, elemPos, value);
 
         } else if ("DTP".equals(seg)) {
@@ -584,6 +604,9 @@ public class X12Edi837Parser implements ClaimFileParser {
     private static class TransactionState {
 
         String isaControlNumber;
+
+        // ST02 — transaction set control number (Phase 12 ack correlator)
+        String stControlNumber;
 
         // NM1 tracking
         String currentNm1Qualifier;
