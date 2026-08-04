@@ -25,6 +25,10 @@
             <a class="btn" href="${pageContext.request.contextPath}/members/${member.id}/edit">Edit</a>
             <a class="btn" href="${pageContext.request.contextPath}/prior-auth/new?memberId=${member.id}">+ Prior Auth</a>
             <a class="btn" href="${pageContext.request.contextPath}/referrals/new?memberId=${member.id}">+ Referral</a>
+            <form method="post" action="${pageContext.request.contextPath}/members/${member.id}/eligibility/check" style="display:inline">
+                <input type="hidden" name="_csrf" value="${_csrf}">
+                <button type="submit" class="btn">Check Eligibility</button>
+            </form>
             <c:if test="${member.status == 'ACTIVE'}">
                 <form method="post" action="${pageContext.request.contextPath}/members/${member.id}/deactivate" style="display:inline">
         <input type="hidden" name="_csrf" value="${_csrf}">
@@ -69,6 +73,26 @@
         </c:forEach>
         <c:if test="${empty coverageRecords}">
             <tr><td colspan="5" style="color:#9aa6b4;text-align:center;padding:16px">No coverage records.</td></tr>
+        </c:if>
+        </tbody>
+    </table>
+
+    <h2 class="section-heading">Eligibility Check History</h2>
+    <table class="data-table">
+        <thead>
+            <tr><th>Checked At</th><th>Service Type</th><th>Result</th><th>Detail</th></tr>
+        </thead>
+        <tbody>
+        <c:forEach var="chk" items="${eligibilityChecks}">
+            <tr>
+                <td><fmt:formatDate value="${chk.inquiryAt}" pattern="yyyy-MM-dd HH:mm"/></td>
+                <td><c:out value="${chk.serviceType}"/></td>
+                <td><span class="badge badge-${chk.resultStatus == 'ACTIVE' ? 'active' : 'inactive'}"><c:out value="${chk.resultStatus}"/></span></td>
+                <td><c:out value="${chk.coverageSnapshot}"/></td>
+            </tr>
+        </c:forEach>
+        <c:if test="${empty eligibilityChecks}">
+            <tr><td colspan="4" style="color:#9aa6b4;text-align:center;padding:16px">No eligibility checks yet.</td></tr>
         </c:if>
         </tbody>
     </table>

@@ -1,6 +1,7 @@
 package com.meridian.claims.service;
 
 import com.meridian.claims.dao.LookupDAO;
+import com.meridian.claims.model.CarcRarcCode;
 import com.meridian.claims.model.DenialReasonCode;
 import com.meridian.claims.model.DiagnosisCode;
 import com.meridian.claims.model.ProcedureCode;
@@ -37,6 +38,7 @@ public class LookupService {
     private volatile List<ProcedureCode> procedureCodes = Collections.emptyList();
     private volatile List<DiagnosisCode> diagnosisCodes = Collections.emptyList();
     private volatile List<ServiceTypeCategory> serviceTypeCategories = Collections.emptyList();
+    private volatile List<CarcRarcCode> carcRarcCodes = Collections.emptyList();
 
     @Autowired
     public LookupService(LookupDAO lookupDAO) {
@@ -50,10 +52,11 @@ public class LookupService {
             procedureCodes = Collections.unmodifiableList(lookupDAO.findAllProcedureCodes());
             diagnosisCodes = Collections.unmodifiableList(lookupDAO.findAllDiagnosisCodes());
             serviceTypeCategories = Collections.unmodifiableList(lookupDAO.findAllServiceTypeCategories());
+            carcRarcCodes = Collections.unmodifiableList(lookupDAO.findAllCarcRarcCodes());
         }
         LOG.info("Lookup caches refreshed: " + denialReasonCodes.size() + " denial reasons, "
             + procedureCodes.size() + " procedure codes, " + diagnosisCodes.size() + " diagnosis codes, "
-            + serviceTypeCategories.size() + " service types");
+            + serviceTypeCategories.size() + " service types, " + carcRarcCodes.size() + " CARC/RARC codes");
     }
 
     // --- Denial Reason Codes ---
@@ -166,6 +169,35 @@ public class LookupService {
         }
         synchronized (refreshLock) {
             serviceTypeCategories = Collections.unmodifiableList(lookupDAO.findAllServiceTypeCategories());
+        }
+    }
+
+    // --- CARC/RARC Codes (Phase 19) ---
+
+    public List<CarcRarcCode> listCarcRarcCodes() {
+        return carcRarcCodes;
+    }
+
+    public CarcRarcCode getCarcRarcCode(String code) {
+        for (CarcRarcCode c : carcRarcCodes) {
+            if (c.getCode().equals(code)) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    public void saveCarcRarcCode(CarcRarcCode c) {
+        if (c.getCode() == null || c.getCode().trim().isEmpty()) {
+            throw new ServiceException("CARC/RARC code is required");
+        }
+        if (lookupDAO.findCarcRarcCode(c.getCode()) == null) {
+            lookupDAO.insertCarcRarcCode(c);
+        } else {
+            lookupDAO.updateCarcRarcCode(c);
+        }
+        synchronized (refreshLock) {
+            carcRarcCodes = Collections.unmodifiableList(lookupDAO.findAllCarcRarcCodes());
         }
     }
 }

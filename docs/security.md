@@ -80,11 +80,48 @@ All queries use parameterized `PreparedStatement` / `JdbcTemplate` bound params.
 
 DB credentials come from environment variables (`MERIDIAN_DB_USER`, `MERIDIAN_DB_PASSWORD`) in production — never literal values in a packaged file. `StartupValidator` aborts boot with a clear message if they are absent under the `prod` profile. See [configuration.md](configuration.md).
 
+## Trading-partner credentials (Phase 13)
+
+`trading_partners.transport_credential_ref` is a **key name only** — never a password. At
+connect time, `SftpTransportAdapter` resolves the real SFTP password from the Spring
+`Environment` via `claims.transport.credential.<ref>`, which is only ever set in the external
+prod property overlay (never in `application.properties`, never in source, never in the WAR).
+A partner configured for SFTP with no matching key fails cleanly with a `TransportException`
+(logged, that partner skipped for the poll run) rather than silently proceeding or leaking the
+missing-credential state as a stack trace. Host-key verification is not yet pinned
+(`StrictHostKeyChecking=no`) — internal trading-partner endpoints are not expected to be on a
+public trust store the app ships with; pinning known hosts is an operational setup step,
+tracked for the Phase 22 security review rather than assumed at code level.
+
+## Real-time eligibility client (Phase 16)
+
+`MockEligibilityClient` is the only `EligibilityClient` implementation today — it never makes an
+outbound network call (no live clearinghouse partner exists yet), so there is no credential
+surface to secure. When a real implementation is built against a live clearinghouse, it will
+follow the same external-config credential pattern as `SftpTransportAdapter` above — a key-name
+reference resolved from the prod overlay, never a literal in source, the WAR, or the DB.
+`eligibility_checks.coverage_snapshot` is member-identifying and is written through the same
+`AuditService` audit trail as every other PHI-adjacent write; there is no separate exemption.
+
+## Provider banking info (Phase 18)
+
+`providers.ach_routing_number`/`ach_account_number` are financial data, not PHI, but still
+sensitive. Masked on display (`LogMaskUtil.maskMemberNumber` — the same masking convention
+already used for member numbers) and never written to logs in full; `EftPaymentService` logs
+only the provider's NPI and name when generating an ACH entry, never the account number. Unlike
+`MockEligibilityClient`, NACHA generation here is real (not a stub), so the account number sits
+in the database in plaintext today — this MVP has no field-level encryption anywhere (see
+`payments`/`claims_archive` for the same posture) — and would need encryption-at-rest before
+handling a real production disbursement account; tracked for the Phase 22 security review
+rather than assumed at code level.
+
 ## Batch intake PHI handling
 
 The `InboundClaimFilePollerJob` runs off-session (no HTTP request, no Spring `RequestContextHolder`). Audit entries written during batch processing have `user_id = NULL` (the null-safe design of `AuditService` and `PhiAccessLogService` is intentional and tested). Claims are attributed to the seeded `system` user in `claims.created_by_user_id`.
 
 PHI in intake error messages (member numbers, dates of birth) is masked via `LogMaskUtil.maskDobsInMessage` before being written to `audit_log` or the application log. Raw values are never logged.
+
+`EnrollmentIntakeService` (Phase 17) applies the same masking, now via the shared `LogMaskUtil.maskPhi` composition (extracted during the Phase 17 duplication sweep — previously `IntakeService` and `EnrollmentIntakeService` each hand-composed `maskMemberNumber(maskDobsInMessage(...))` independently). An 834 file directly creates/updates member demographics, so quarantine messages for it carry the same PHI-masking guarantee as claim intake.
 
 ## Audit channels
 

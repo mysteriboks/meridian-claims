@@ -8,6 +8,7 @@ import com.meridian.claims.model.Claim;
 import com.meridian.claims.model.ClaimStatus;
 import com.meridian.claims.model.Payment;
 import com.meridian.claims.model.PaymentBatch;
+import com.meridian.claims.model.RemittanceBatch;
 import com.meridian.claims.util.Money;
 import org.junit.Before;
 import org.junit.Test;
@@ -30,6 +31,7 @@ public class PaymentBatchServiceTest {
     private ClaimService claimService;
     private SubrogationService subrogationService;
     private RemittanceService remittanceService;
+    private EftPaymentService eftPaymentService;
     private AuditService auditService;
 
     @Before
@@ -42,6 +44,7 @@ public class PaymentBatchServiceTest {
         claimService       = Mockito.mock(ClaimService.class);
         subrogationService = Mockito.mock(SubrogationService.class);
         remittanceService  = Mockito.mock(RemittanceService.class);
+        eftPaymentService  = Mockito.mock(EftPaymentService.class);
         auditService       = Mockito.mock(AuditService.class);
 
         ReflectionTestUtils.setField(batchService, "paymentBatchDAO",    paymentBatchDAO);
@@ -51,6 +54,7 @@ public class PaymentBatchServiceTest {
         ReflectionTestUtils.setField(batchService, "claimService",       claimService);
         ReflectionTestUtils.setField(batchService, "subrogationService", subrogationService);
         ReflectionTestUtils.setField(batchService, "remittanceService",  remittanceService);
+        ReflectionTestUtils.setField(batchService, "eftPaymentService",  eftPaymentService);
         ReflectionTestUtils.setField(batchService, "auditService",       auditService);
     }
 
@@ -110,11 +114,18 @@ public class PaymentBatchServiceTest {
         Mockito.when(claimDAO.findById(100)).thenReturn(claim);
         Mockito.when(providerDAO.findById(5)).thenReturn(new com.meridian.claims.model.Provider());
 
+        RemittanceBatch remittanceBatch = new RemittanceBatch();
+        remittanceBatch.setId(50);
+        Mockito.when(remittanceService.generateBatch(Mockito.anyList(), Mockito.any(java.util.Date.class)))
+            .thenReturn(remittanceBatch);
+
         String csv = batchService.exportCsv(5, 1);
 
         Mockito.verify(claimDAO).updateStatus(100, "PAID", 2);
         // Remittance advice generated simultaneously on export (PHASES.md Phase 6)
         Mockito.verify(remittanceService).generateBatch(Mockito.anyList(), Mockito.any(java.util.Date.class));
+        // EFT/ACH issuance attempted simultaneously (Phase 18)
+        Mockito.verify(eftPaymentService).generateForBatch(Mockito.eq(batch), Mockito.eq(remittanceBatch), Mockito.anyList());
         assertNotNull(csv);
         assertTrue(csv.contains("CLM-20260101-000001"));
     }

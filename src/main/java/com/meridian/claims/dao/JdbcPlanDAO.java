@@ -42,6 +42,19 @@ public class JdbcPlanDAO extends BaseDAO implements PlanDAO {
     }
 
     @Override
+    public Plan findByName(String planName) {
+        String sql = "SELECT " + SELECT_COLS + " FROM plans WHERE deleted_at IS NULL AND LOWER(plan_name) = LOWER(?)";
+        try {
+            return getJdbcTemplate().queryForObject(sql, new PlanRowMapper(), planName);
+        } catch (EmptyResultDataAccessException e) {
+            return null;
+        } catch (Exception e) {
+            LOG.error("findByName failed planName=" + planName, e);
+            throw new DAOException("Could not load plan by name=" + planName, e);
+        }
+    }
+
+    @Override
     public Page<Plan> findAll(int pageNumber, int pageSize) {
         String countSql = "SELECT COUNT(*) FROM plans WHERE deleted_at IS NULL";
         String dataSql = "SELECT " + SELECT_COLS + " FROM plans WHERE deleted_at IS NULL " +

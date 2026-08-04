@@ -5,6 +5,7 @@ import com.meridian.claims.model.Provider;
 import com.meridian.claims.model.ProviderType;
 import com.meridian.claims.service.ProviderService;
 import com.meridian.claims.service.ServiceException;
+import com.meridian.claims.util.LogMaskUtil;
 import com.meridian.claims.util.Page;
 import com.meridian.claims.util.ValidationUtil;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -80,7 +81,9 @@ public class ProviderController {
 
     @RequestMapping(value = "/{id}", method = RequestMethod.GET)
     public String view(@PathVariable("id") int id, Model model) {
-        model.addAttribute("provider", providerService.findById(id));
+        Provider provider = providerService.findById(id);
+        model.addAttribute("provider", provider);
+        model.addAttribute("maskedAchAccountNumber", LogMaskUtil.maskMemberNumber(provider.getAchAccountNumber()));
         return "providers/view";
     }
 
@@ -144,5 +147,21 @@ public class ProviderController {
         providerService.deactivateProvider(id);
         redirectAttrs.addFlashAttribute("success", "Provider deactivated.");
         return "redirect:/providers";
+    }
+
+    @RequestMapping(value = "/{id}/banking", method = RequestMethod.POST)
+    public String updateBanking(
+            @PathVariable("id") int id,
+            @RequestParam(value = "achRoutingNumber", required = false) String routingNumber,
+            @RequestParam(value = "achAccountNumber", required = false) String accountNumber,
+            @RequestParam(value = "achAccountType", required = false) String accountType,
+            RedirectAttributes redirectAttrs) {
+        try {
+            providerService.updateBankingInfo(id, routingNumber, accountNumber, accountType);
+            redirectAttrs.addFlashAttribute("success", "Banking info updated.");
+        } catch (ServiceException e) {
+            redirectAttrs.addFlashAttribute("error", e.getMessage());
+        }
+        return "redirect:/providers/" + id;
     }
 }

@@ -22,6 +22,11 @@ Physical schema reference for Meridian Claims. All information is derived direct
 | V12 | `V12__phase9_batch_intake.sql` | `claim_intake_batches` — SHA-256 idempotency ledger for inbound file processing; seeds the `system` batch-actor user (`active=false`, login blocked) |
 | V13 | `V13__phase10_external_reference.sql` | `claims.external_reference VARCHAR(50)` — nullable column for the X12 ISA interchange control number on EDI-submitted claims |
 | V14 | `V14__phase11_remittance_procedure_code.sql` | `remittance_batch_items.procedure_code VARCHAR(20)` — nullable column carrying the line's CPT/HCPCS code into the SVC segment of the outbound X12 835 remittance |
+| V15 | `V15__phase12_edi_transactions.sql` | `edi_transactions` — the integration transaction log/reconciliation backbone; one row per inbound/outbound EDI interchange, acknowledgments linked back via `related_transaction_id` |
+| V16 | `V16__phase13_trading_partners.sql` | `trading_partners` — trading-partner master (X12 identity, transport config, credential *reference* only); `edi_transactions.trading_partner_id` added via `ALTER TABLE` |
+| V17 | `V17__phase16_eligibility_checks.sql` | `eligibility_checks` — real-time eligibility check event log (member, provider, service type, result status, coverage snapshot); not part of `edi_transactions` |
+| V18 | `V18__phase17_enrollment_batches.sql` | `enrollment_batches` — X12 834 enrollment file idempotency ledger, structurally identical to `claim_intake_batches` (Phase 9) |
+| V19 | `V19__phase18_eft_payments.sql` | `eft_payments` — one row per payment batch's NACHA ACH file generation, TRN reassociation number shared with the paired 835; adds `providers.ach_routing_number`/`ach_account_number`/`ach_account_type` |
 
 Production migrations are **append-only** — never edit an applied migration; add a new V-numbered file.
 
@@ -40,6 +45,11 @@ graph LR
     V11 --> V12["V12<br/>batch intake"]
     V12 --> V13["V13<br/>external_reference"]
     V13 --> V14["V14<br/>remittance procedure_code"]
+    V14 --> V15["V15<br/>edi_transactions"]
+    V15 --> V16["V16<br/>trading_partners"]
+    V16 --> V17["V17<br/>eligibility_checks"]
+    V17 --> V18["V18<br/>enrollment_batches"]
+    V18 --> V19["V19<br/>eft_payments"]
 ```
 
 ---
@@ -152,6 +162,9 @@ Doctors or facilities submitting claims. Identified by NPI. Soft-deleted via `de
 | `network_status` | `VARCHAR(20)` | NO | `'IN_NETWORK'` | `IN_NETWORK` / `OUT_OF_NETWORK` |
 | `phone` | `VARCHAR(20)` | YES | | |
 | `address` | `VARCHAR(255)` | YES | | |
+| `ach_routing_number` | `VARCHAR(9)` | YES | | Added V19 (Phase 18); 9-digit ACH routing (ABA) number. NULL = no electronic disbursement configured — provider is skipped (paid by check) when a payment batch's ACH file is generated. |
+| `ach_account_number` | `VARCHAR(17)` | YES | | Added V19 (Phase 18); masked on display (`LogMaskUtil.maskMemberNumber`), never logged in full. |
+| `ach_account_type` | `VARCHAR(10)` | YES | | Added V19 (Phase 18); `CHECKING` / `SAVINGS` (`CHECK` constraint) or NULL. |
 | `deleted_at` | `TIMESTAMP` | YES | | NULL = not deleted (soft-delete) |
 | `created_at` | `TIMESTAMP` | NO | `NOW()` | |
 | `updated_at` | `TIMESTAMP` | NO | `NOW()` | Maintained by trigger |
@@ -786,7 +799,147 @@ A `PROCESSING` row left by an interrupted run is automatically reclaimed on the 
 of the same file (stale-PROCESSING recovery). Only `COMPLETED` and `FAILED` rows are
 permanent no-ops for idempotency.
 
-Viewable in **Admin → Intake Batches** (ADMIN role).
+---
+
+### `enrollment_batches`
+
+Idempotency ledger for inbound X12 834 enrollment files, processed by `EnrollmentIntakeService`
+(Phase 17). Structurally identical to `claim_intake_batches` above — same SHA-256 idempotency
+key, status enum, and count columns — just for enrollment records instead of claim records.
+
+| Column | Type | Nullable | Default | Notes |
+| -------- | ------ | ---------- | --------- | ------- |
+| `id` | `SERIAL` | NO | auto | PK |
+| `file_name` | `VARCHAR(255)` | NO | | Original filename |
+| `file_hash` | `VARCHAR(64)` | NO | | SHA-256 hex digest; `UNIQUE` constraint enforces one row per unique file content |
+| `status` | `VARCHAR(20)` | NO | `'PROCESSING'` | `PROCESSING` / `COMPLETED` / `FAILED` |
+| `total_records` | `INTEGER` | NO | `0` | Total INS (enrollment) loops in the file |
+| `succeeded` | `INTEGER` | NO | `0` | Records successfully applied (member created/updated, coverage added/terminated) |
+| `quarantined` | `INTEGER` | NO | `0` | Records that failed validation or resolution (unknown member, unresolvable plan, missing dates, unrecognized maintenance code) |
+| `error_message` | `TEXT` | YES | | Summary of quarantine reasons or file-level error |
+| `created_at` | `TIMESTAMP` | NO | `NOW()` | Time the ledger row was inserted |
+| `updated_at` | `TIMESTAMP` | NO | `NOW()` | Updated when status changes to COMPLETED or FAILED |
+
+Index: `idx_enrollment_batches_status (status)`.
+
+Same stale-`PROCESSING` reclaim behavior as `claim_intake_batches`. Viewable in **Admin →
+Enrollment Batches** (ADMIN role).
+
+---
+
+### `eft_payments`
+
+One row per payment batch's NACHA ACH file generation (Phase 18), created by `EftPaymentService`
+when `PaymentBatchService.exportCsv` runs. Not created at all if no provider in the batch has
+ACH banking info configured — that batch stays entirely check-paid, matching how it always
+worked before this phase. `trn_reassociation_number` is the same value stamped on the paired
+835's TRN02 segment, letting a provider match the electronic deposit back to its remittance advice.
+
+| Column | Type | Nullable | Default | Notes |
+| -------- | ------ | ---------- | --------- | ------- |
+| `id` | `SERIAL` | NO | auto | PK |
+| `payment_batch_id` | `INTEGER` | NO | | FK → `payment_batches(id)`; `UNIQUE` — at most one EFT generation per batch |
+| `remittance_batch_id` | `INTEGER` | NO | | FK → `remittance_batches(id)`; the paired 835's batch, for regenerating the ACH text on re-download |
+| `trn_reassociation_number` | `VARCHAR(30)` | NO | | `"EFT" + zero-padded payment_batch_id`; shared with the 835's TRN02 |
+| `amount` | `NUMERIC(12,2)` | NO | | Sum of the ACH-paid providers' amounts only — may be less than the full batch total if some providers were skipped |
+| `settlement_status` | `VARCHAR(20)` | NO | `'GENERATED'` | `GENERATED` / `SETTLED` / `FAILED`; `SETTLED` is set manually via the Finance UI — no live bank feed exists to detect it automatically |
+| `ach_file_reference` | `VARCHAR(255)` | YES | | Disk path, if `claims.eft.output.path` is configured; NULL otherwise (the ACH file is regenerated on demand for download) |
+| `entry_count` | `INTEGER` | NO | `0` | Number of providers paid electronically in this batch |
+| `skipped_provider_count` | `INTEGER` | NO | `0` | Number of providers in the batch with no (or invalid) banking info configured |
+| `created_at` | `TIMESTAMP` | NO | `NOW()` | |
+| `updated_at` | `TIMESTAMP` | NO | `NOW()` | Maintained by trigger |
+
+Index: `idx_eft_payments_batch (payment_batch_id)`.
+
+Viewable on the Finance batch detail screen (EFT status panel, Download ACH File, Mark Settled).
+
+---
+
+### `edi_transactions`
+
+The integration transaction log — the reconciliation backbone for the interoperability
+program (Phase 12+). One row per inbound or outbound EDI interchange/transaction. An
+acknowledgment row (999 / 277CA / TA1) links back to the inbound transaction it responds to
+via `related_transaction_id`, so the full 837 → 999/277CA chain is reconstructable for any file.
+
+| Column | Type | Nullable | Default | Notes |
+| -------- | ------ | ---------- | --------- | ------- |
+| `id` | `SERIAL` | NO | auto | PK |
+| `direction` | `VARCHAR(10)` | NO | | CHECK: `INBOUND` / `OUTBOUND` |
+| `transaction_type` | `VARCHAR(10)` | NO | | `837`, `999`, `277CA`, `TA1`, `276`, `277`, `278` — every transaction type through Phase 15. Real-time eligibility (270/271, Phase 16) does **not** use this table — it is a member-scoped check event, not a trading-partner file exchange, so it has its own `eligibility_checks` table below. `834` enrollment (Phase 17, planned) will similarly get its own `enrollment_batches` ledger rather than reusing this table. |
+| `isa_control_number` | `VARCHAR(20)` | YES | | ISA13; NULL if the interchange failed before it could be read |
+| `gs_control_number` | `VARCHAR(20)` | YES | | GS06 |
+| `st_control_number` | `VARCHAR(20)` | YES | | ST02 (per-transaction) |
+| `status` | `VARCHAR(20)` | NO | | CHECK: `ACCEPTED` / `REJECTED` / `PARTIAL` |
+| `related_transaction_id` | `INTEGER` | YES | | Self-FK; links an ack row back to the inbound row it responds to |
+| `file_reference` | `VARCHAR(255)` | YES | | Original file name |
+| `detail` | `TEXT` | YES | | The generated EDI text (for outbound rows) or the failure reason (for rejected inbound rows) |
+| `trading_partner_id` | `INTEGER` | YES | | FK → `trading_partners(id)`, added V16; NULL = the global (non-partner-scoped) intake directory |
+| `created_at` | `TIMESTAMP` | NO | `NOW()` | |
+| `updated_at` | `TIMESTAMP` | NO | `NOW()` | Maintained by trigger |
+
+Indexes: `idx_edi_transactions_isa`, `idx_edi_transactions_related`, `idx_edi_transactions_created_at`, `idx_edi_transactions_trading_partner`.
+
+Viewable in **Admin → Integrations** (ADMIN role); filterable/attributable by trading partner.
+
+---
+
+### `trading_partners`
+
+The trading-partner master (Phase 13) — each row is one partner's X12 identity and file
+transport configuration. **Credentials are never stored here.** `transport_credential_ref` is a
+key name only; the real SFTP password resolves at connect time from
+`claims.transport.credential.<ref>` in the external prod property overlay.
+
+| Column | Type | Nullable | Default | Notes |
+| -------- | ------ | ---------- | --------- | ------- |
+| `id` | `SERIAL` | NO | auto | PK |
+| `partner_name` | `VARCHAR(100)` | NO | | Display name |
+| `isa_qualifier` | `VARCHAR(2)` | NO | | ISA05/ISA07 qualifier (e.g. `ZZ`) |
+| `isa_id` | `VARCHAR(15)` | NO | | ISA06/ISA08 sender/receiver id |
+| `gs_id` | `VARCHAR(15)` | NO | | GS02/GS03 application sender/receiver code |
+| `enabled_transactions` | `VARCHAR(200)` | YES | | Comma-separated, e.g. `837,999,277CA` |
+| `transport_type` | `VARCHAR(10)` | NO | `'LOCAL'` | CHECK: `LOCAL` / `SFTP` |
+| `transport_host` | `VARCHAR(255)` | YES | | SFTP host; unused for `LOCAL` |
+| `transport_port` | `INTEGER` | YES | | SFTP port; defaults to 22 if null |
+| `transport_username` | `VARCHAR(100)` | YES | | SFTP username |
+| `transport_credential_ref` | `VARCHAR(200)` | YES | | Key name only — **never a secret**; resolved from the external prod overlay |
+| `inbound_path` | `VARCHAR(500)` | YES | | Local directory (`LOCAL`) or remote path (`SFTP`) |
+| `outbound_path` | `VARCHAR(500)` | YES | | Where acknowledgments are written back to |
+| `active` | `BOOLEAN` | NO | `TRUE` | Only active partners are polled by `TradingPartnerPollerJob` |
+| `created_at` | `TIMESTAMP` | NO | `NOW()` | |
+| `updated_at` | `TIMESTAMP` | NO | `NOW()` | Maintained by trigger |
+
+Index: `idx_trading_partners_active`.
+
+Managed at **Admin → Trading Partners** (ADMIN role).
+
+---
+
+### `eligibility_checks`
+
+One row per real-time eligibility check (X12 270/271, Phase 16), triggered by the "Check
+Eligibility" action on the member-detail screen. Unlike every other integration transaction
+type, this is **not** logged to `edi_transactions` — it is a member-scoped check event, not a
+trading-partner file exchange, since Meridian is the requester here rather than the responder.
+
+| Column | Type | Nullable | Default | Notes |
+| -------- | ------ | ---------- | --------- | ------- |
+| `id` | `SERIAL` | NO | auto | PK |
+| `member_id` | `INTEGER` | NO | | FK → `members(id)` |
+| `provider_id` | `INTEGER` | YES | | FK → `providers(id)`; NULL for a member-only check |
+| `service_type` | `VARCHAR(50)` | YES | | EQ01 requested service type code (e.g. `30` = general coverage) |
+| `inquiry_at` | `TIMESTAMP` | NO | `NOW()` | When the check was initiated |
+| `response_at` | `TIMESTAMP` | YES | | When a response (or failure) was recorded |
+| `result_status` | `VARCHAR(20)` | NO | | CHECK: `ACTIVE` / `INACTIVE` / `ERROR` — mapped from the 271's EB01 code; a client failure or unparseable response also maps to `ERROR` |
+| `coverage_snapshot` | `TEXT` | YES | | Plan/coverage description from the 271 (EB05 or MSG01), or the failure reason when `result_status = ERROR` |
+| `checked_by_user_id` | `INTEGER` | YES | | FK → `users(id)`; the staff user who triggered the check |
+| `created_at` | `TIMESTAMP` | NO | `NOW()` | |
+| `updated_at` | `TIMESTAMP` | NO | `NOW()` | Maintained by trigger |
+
+Indexes: `idx_eligibility_checks_member`, `idx_eligibility_checks_inquiry_at`.
+
+Viewable in the "Eligibility Check History" panel on the member-detail screen (last 10 checks per member).
 
 ---
 

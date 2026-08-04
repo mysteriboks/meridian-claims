@@ -19,6 +19,10 @@
                     <li><a href="${pageContext.request.contextPath}/admin/lookups/denial-reasons">Denial Reasons</a></li>
                     <li><a href="${pageContext.request.contextPath}/admin/lookups/service-types">Service Types</a></li>
                     <li><a href="${pageContext.request.contextPath}/admin/intake-batches">Intake Batches</a></li>
+                    <li><a href="${pageContext.request.contextPath}/admin/enrollment-batches">Enrollment Batches</a></li>
+                    <li><a href="${pageContext.request.contextPath}/admin/reference-data-imports">Reference Data Imports</a></li>
+                    <li><a href="${pageContext.request.contextPath}/admin/integrations">Integrations</a></li>
+                    <li><a href="${pageContext.request.contextPath}/admin/trading-partners">Trading Partners</a></li>
                     <li><a href="${pageContext.request.contextPath}/admin/operations">Operations</a></li>
                     <li><a href="${pageContext.request.contextPath}/admin/audit">Audit Log</a></li>
                 </ul>

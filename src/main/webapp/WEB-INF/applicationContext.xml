@@ -193,6 +193,34 @@
         <property name="cronExpression" value="${claims.jobs.intake.cron:0 0/5 * * * ?}"/>
     </bean>
 
+    <!-- Phase 13 — Trading-partner poller (per-partner local/SFTP transport) -->
+    <bean id="tradingPartnerPollerJobDetail"
+          class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+        <property name="jobClass" value="com.meridian.claims.job.TradingPartnerPollerJob"/>
+        <property name="durability" value="true"/>
+    </bean>
+
+    <bean id="tradingPartnerPollerTrigger"
+          class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+        <property name="jobDetail" ref="tradingPartnerPollerJobDetail"/>
+        <!-- Default: every 10 minutes. Override via claims.jobs.trading-partner.cron. -->
+        <property name="cronExpression" value="${claims.jobs.trading-partner.cron:0 0/10 * * * ?}"/>
+    </bean>
+
+    <!-- Phase 19 — Reference-data feed poller (NPPES / CARC-RARC / ICD-10 / CPT-HCPCS) -->
+    <bean id="referenceDataFeedPollerJobDetail"
+          class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+        <property name="jobClass" value="com.meridian.claims.job.ReferenceDataFeedPollerJob"/>
+        <property name="durability" value="true"/>
+    </bean>
+
+    <bean id="referenceDataFeedPollerTrigger"
+          class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+        <property name="jobDetail" ref="referenceDataFeedPollerJobDetail"/>
+        <!-- Default: 05:00 every Monday. Override via claims.jobs.referencedata.cron. -->
+        <property name="cronExpression" value="${claims.jobs.referencedata.cron:0 0 5 * * MON}"/>
+    </bean>
+
     <bean id="schedulerFactory"
           class="org.springframework.scheduling.quartz.SchedulerFactoryBean">
         <property name="triggers">
@@ -204,6 +232,8 @@
                 <ref bean="slowQueryReportTrigger"/>
                 <ref bean="claimArchiveTrigger"/>
                 <ref bean="inboundClaimFilePollerTrigger"/>
+                <ref bean="tradingPartnerPollerTrigger"/>
+                <ref bean="referenceDataFeedPollerTrigger"/>
             </list>
         </property>
         <property name="jobFactory" ref="quartzJobFactory"/>

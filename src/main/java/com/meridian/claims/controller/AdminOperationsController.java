@@ -38,7 +38,7 @@ public class AdminOperationsController {
     private static final List<String> TRIGGERABLE_JOBS = Arrays.asList(
         "slaEscalationJobDetail", "staleClaimJobDetail", "benefitYearRolloverJobDetail",
         "appealSlaEscalationJobDetail", "slowQueryReportJobDetail", "claimArchiveJobDetail",
-        "inboundClaimFilePollerJobDetail");
+        "inboundClaimFilePollerJobDetail", "tradingPartnerPollerJobDetail", "referenceDataFeedPollerJobDetail");
 
     @Autowired private BulkReadjudicationService bulkService;
     @Autowired private ScheduledJobLogService jobLogService;

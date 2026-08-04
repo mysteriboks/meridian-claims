@@ -110,6 +110,27 @@ public class X12Edi837ParserTest {
     }
 
     // -------------------------------------------------------------------------
+    // Phase 12 — interchange/transaction control number capture (EDI acks)
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void valid837P_capturesIsaAndGsControlNumbers() throws Exception {
+        ClaimFileParseResult result = parser.parse(minimal837P());
+
+        assertEquals("ISA13", ISA_CONTROL_NR, result.getIsaControlNumber());
+        assertEquals("GS06", "1", result.getGsControlNumber());
+    }
+
+    @Test
+    public void twoTransactionBundle_eachRecordKeepsItsOwnStControlNumber() throws Exception {
+        ClaimFileParseResult result = parser.parse(twoTransaction837P_secondBadCpt());
+
+        // Transaction 1 (ST*837*0001) succeeded; transaction 2 (ST*837*0002) was quarantined.
+        assertEquals("0001", result.getClaimStControlNumber(0));
+        assertEquals("0002", result.getRecordErrors().get(0).getStControlNumber());
+    }
+
+    // -------------------------------------------------------------------------
     // Per-record failure — unknown member
     // -------------------------------------------------------------------------
 

@@ -24,6 +24,8 @@ public class JdbcProviderDAO extends BaseDAO implements ProviderDAO {
 
     private static final String SELECT_COLS =
         "id, npi, name, provider_type, specialty, network_status, phone, address, " +
+        "ach_routing_number, ach_account_number, ach_account_type, " +
+        "npi_validation_status, npi_validated_at, " +
         "deleted_at, created_at, updated_at";
 
     @Override
@@ -143,6 +145,29 @@ public class JdbcProviderDAO extends BaseDAO implements ProviderDAO {
     }
 
     @Override
+    public void updateBankingInfo(int id, String routingNumber, String accountNumber, String accountType) {
+        String sql = "UPDATE providers SET ach_routing_number = ?, ach_account_number = ?, ach_account_type = ? WHERE id = ?";
+        try {
+            getJdbcTemplate().update(sql, routingNumber, accountNumber, accountType, id);
+        } catch (Exception e) {
+            LOG.error("updateBankingInfo failed id=" + id, e);
+            throw new DAOException("Could not update banking info for provider id=" + id, e);
+        }
+    }
+
+    @Override
+    public void updateNpiValidation(int id, String status, java.util.Date validatedAt) {
+        String sql = "UPDATE providers SET npi_validation_status = ?, npi_validated_at = ? WHERE id = ?";
+        try {
+            getJdbcTemplate().update(sql, status,
+                validatedAt == null ? null : new java.sql.Timestamp(validatedAt.getTime()), id);
+        } catch (Exception e) {
+            LOG.error("updateNpiValidation failed id=" + id, e);
+            throw new DAOException("Could not update NPI validation status for provider id=" + id, e);
+        }
+    }
+
+    @Override
     public void softDelete(int id) {
         try {
             getJdbcTemplate().update("UPDATE providers SET deleted_at = NOW() WHERE id = ?", id);
@@ -164,6 +189,12 @@ public class JdbcProviderDAO extends BaseDAO implements ProviderDAO {
             p.setNetworkStatus(NetworkStatus.valueOf(rs.getString("network_status")));
             p.setPhone(rs.getString("phone"));
             p.setAddress(rs.getString("address"));
+            p.setAchRoutingNumber(rs.getString("ach_routing_number"));
+            p.setAchAccountNumber(rs.getString("ach_account_number"));
+            p.setAchAccountType(rs.getString("ach_account_type"));
+            p.setNpiValidationStatus(rs.getString("npi_validation_status"));
+            Timestamp npiValidatedAt = rs.getTimestamp("npi_validated_at");
+            if (npiValidatedAt != null) p.setNpiValidatedAt(new java.util.Date(npiValidatedAt.getTime()));
             Timestamp deletedAt = rs.getTimestamp("deleted_at");
             if (deletedAt != null) p.setDeletedAt(new java.util.Date(deletedAt.getTime()));
             Timestamp createdAt = rs.getTimestamp("created_at");

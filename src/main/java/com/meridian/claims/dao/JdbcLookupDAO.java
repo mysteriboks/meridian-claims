@@ -1,5 +1,6 @@
 package com.meridian.claims.dao;
 
+import com.meridian.claims.model.CarcRarcCode;
 import com.meridian.claims.model.DenialReasonCode;
 import com.meridian.claims.model.DiagnosisCode;
 import com.meridian.claims.model.ProcedureCode;
@@ -226,6 +227,58 @@ public class JdbcLookupDAO extends BaseDAO implements LookupDAO {
         }
     }
 
+    // --- CARC/RARC Codes ---
+
+    @Override
+    public List<CarcRarcCode> findAllCarcRarcCodes() {
+        try {
+            return getJdbcTemplate().query(
+                "SELECT code, code_type, description, active FROM carc_rarc_codes ORDER BY code",
+                new CarcRarcCodeRowMapper());
+        } catch (Exception e) {
+            LOG.error("findAllCarcRarcCodes failed", e);
+            throw new DAOException("Could not list CARC/RARC codes", e);
+        }
+    }
+
+    @Override
+    public CarcRarcCode findCarcRarcCode(String code) {
+        try {
+            return getJdbcTemplate().queryForObject(
+                "SELECT code, code_type, description, active FROM carc_rarc_codes WHERE code = ?",
+                new CarcRarcCodeRowMapper(), code);
+        } catch (EmptyResultDataAccessException e) {
+            return null;
+        } catch (Exception e) {
+            LOG.error("findCarcRarcCode failed code=" + code, e);
+            throw new DAOException("Could not load CARC/RARC code " + code, e);
+        }
+    }
+
+    @Override
+    public void insertCarcRarcCode(CarcRarcCode c) {
+        try {
+            getJdbcTemplate().update(
+                "INSERT INTO carc_rarc_codes (code, code_type, description, active) VALUES (?, ?, ?, ?)",
+                c.getCode(), c.getCodeType(), c.getDescription(), c.isActive());
+        } catch (Exception e) {
+            LOG.error("insertCarcRarcCode failed code=" + c.getCode(), e);
+            throw new DAOException("Could not insert CARC/RARC code", e);
+        }
+    }
+
+    @Override
+    public void updateCarcRarcCode(CarcRarcCode c) {
+        try {
+            getJdbcTemplate().update(
+                "UPDATE carc_rarc_codes SET code_type = ?, description = ?, active = ? WHERE code = ?",
+                c.getCodeType(), c.getDescription(), c.isActive(), c.getCode());
+        } catch (Exception e) {
+            LOG.error("updateCarcRarcCode failed code=" + c.getCode(), e);
+            throw new DAOException("Could not update CARC/RARC code", e);
+        }
+    }
+
     // --- Row mappers ---
 
     private static final class DenialCodeRowMapper implements RowMapper<DenialReasonCode> {
@@ -268,6 +321,18 @@ public class JdbcLookupDAO extends BaseDAO implements LookupDAO {
         public ServiceTypeCategory mapRow(ResultSet rs, int rowNum) throws SQLException {
             ServiceTypeCategory c = new ServiceTypeCategory();
             c.setCode(rs.getString("code"));
+            c.setDescription(rs.getString("description"));
+            c.setActive(rs.getBoolean("active"));
+            return c;
+        }
+    }
+
+    private static final class CarcRarcCodeRowMapper implements RowMapper<CarcRarcCode> {
+        @Override
+        public CarcRarcCode mapRow(ResultSet rs, int rowNum) throws SQLException {
+            CarcRarcCode c = new CarcRarcCode();
+            c.setCode(rs.getString("code"));
+            c.setCodeType(rs.getString("code_type"));
             c.setDescription(rs.getString("description"));
             c.setActive(rs.getBoolean("active"));
             return c;

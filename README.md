@@ -12,6 +12,7 @@ Meridian is a health-insurance **claims management** system — a server-rendere
 - **Review & payment** — reviewer worklist with assignment, SLA tracking and escalation; approve / deny / request-info; EOB generation; payment processing with partial payments; provider remittance advice.
 - **Batch claim intake** — inbound FHIR R4 Claim JSON (`.json`) and X12 EDI 837P/837I (`.edi`/`.x12`/`.837`) files are polled from a directory every 5 minutes, parsed, and submitted through the same 13-rule adjudication engine as manual claims; per-record fault isolation, SHA-256 idempotency, and a real-time ledger in Admin → Intake Batches.
 - **Outbound EDI 835** — X12 835 Healthcare Claim Payment/Remittance Advice files downloadable from the Finance → Remittance screen; optionally written to disk automatically.
+- **Electronic provider interoperability** — inbound 837 files get real TA1/999/277CA acknowledgments; files move to/from a trading partner's own transport (local directory or SFTP); providers can query claim status (X12 276/277) and request prior authorization (X12 278) electronically; members/providers can run a real-time eligibility check (X12 270/271) from the member screen; member/coverage maintenance flows in via X12 834 enrollment files; approved payment batches can issue a real NACHA ACH file with a TRN reassociation number shared with the paired 835.
 - **Workflow & operations** — member appeals (with re-adjudication on approval), subrogation cases for accident claims, payment-batch CSV export, scheduled jobs (SLA escalation, stale-claim cleanup, benefit-year rollover, slow-query report, archiving), bulk re-adjudication, and member data export.
 
 See [docs/architecture.md](docs/architecture.md) for the full capability map and architecture.
@@ -35,6 +36,7 @@ See [docs/architecture.md](docs/architecture.md) for the full capability map and
 | Tests | JUnit 4 + Mockito; H2 (PostgreSQL mode) for DAO integration tests |
 | EDI parsing | StAEDI (streaming X12 reader/writer) |
 | JSON parsing | Jackson (FHIR R4 Claim JSON) |
+| SFTP transport | JSch (trading-partner file exchange) |
 
 ---
 

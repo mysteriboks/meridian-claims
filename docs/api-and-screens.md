@@ -61,12 +61,13 @@ Base path: `/members` — Controller: `MemberController`
 | GET | `/members` | Authenticated | Paginated member list. Accepts `q` (search) and `page`. Returns 20 per page. |
 | GET | `/members/new` | Authenticated | Renders create-member form with MemberStatus enum values. |
 | POST | `/members/new` | Authenticated | Creates a member. Required: `memberNumber`, `firstName`, `lastName`. Optional: `dob` (yyyy-MM-dd), `address`, `phone`, `email`. Redirects to `/members/{id}` on success. |
-| GET | `/members/{id}` | Authenticated | Member detail view. Displays demographic data, coverage records, and inline coverage-add form (plan, coverage order, effective/termination dates). |
+| GET | `/members/{id}` | Authenticated | Member detail view. Displays demographic data, coverage records, inline coverage-add form (plan, coverage order, effective/termination dates), and the last 10 rows of eligibility check history. |
 | GET | `/members/{id}/edit` | Authenticated | Renders edit form pre-populated with member data. |
 | POST | `/members/{id}/edit` | Authenticated | Updates member demographics and status. Same validation as create (memberNumber not re-validated). Redirects to `/members/{id}`. |
 | POST | `/members/{id}/deactivate` | Authenticated | Deactivates the member. Redirects to `/members`. |
 | POST | `/members/{id}/coverage/add` | Authenticated | Adds a MemberCoverage record. Requires `planId`, `coverageOrder` (PRIMARY/SECONDARY), `effectiveDate`. Optional: `terminationDate`. Redirects to `/members/{id}`. |
 | POST | `/members/{id}/coverage/{coverageId}/remove` | Authenticated | Removes a specific coverage record by its ID. Redirects to `/members/{id}`. |
+| POST | `/members/{id}/eligibility/check` | Authenticated | Runs a real-time X12 270/271 eligibility check (Phase 16) via `EligibilityCheckService`. Optional: `providerId`, `serviceType` (default `30`). Flashes the result (`ACTIVE`/`INACTIVE`/error) and redirects to `/members/{id}`. |
 
 ---
 
@@ -79,10 +80,11 @@ Base path: `/providers` — Controller: `ProviderController`
 | GET | `/providers` | Authenticated | Paginated provider list. Accepts `q` and `page`. Returns 20 per page. |
 | GET | `/providers/new` | Authenticated | Renders create-provider form with ProviderType and NetworkStatus enum values. |
 | POST | `/providers/new` | Authenticated | Creates a provider. Required: `npi` (validated format), `name`, `providerType`, `networkStatus`. Optional: `specialty`, `phone`, `address`. Redirects to `/providers/{id}`. |
-| GET | `/providers/{id}` | Authenticated | Provider detail view. |
+| GET | `/providers/{id}` | Authenticated | Provider detail view. Shows ACH banking info (masked account number) if configured. |
 | GET | `/providers/{id}/edit` | Authenticated | Renders edit form pre-populated with provider data. |
 | POST | `/providers/{id}/edit` | Authenticated | Updates provider record. Same field set as create. Redirects to `/providers/{id}`. |
 | POST | `/providers/{id}/deactivate` | Authenticated | Deactivates the provider. Redirects to `/providers`. |
+| POST | `/providers/{id}/banking` | Authenticated | Sets or clears the provider's ACH disbursement banking info (Phase 18). Optional: `achRoutingNumber` (9 digits), `achAccountNumber`, `achAccountType` (`CHECKING`/`SAVINGS`). All blank clears the banking info. Redirects to `/providers/{id}`. |
 
 ---
 
@@ -165,7 +167,7 @@ All `/finance/**` routes require FINANCE or ADMIN role (enforced by `RoleFilter`
 | GET | `/finance/remittance` | FINANCE, ADMIN | Lists all remittance batches alongside currently pending payments. |
 | POST | `/finance/remittance/generate` | FINANCE, ADMIN | Generates a new remittance batch. Required: `paymentIds` (comma-separated integers), `paymentDate` (yyyy-MM-dd). Redirects to `/finance/remittance/{id}`. |
 | GET | `/finance/remittance/{id}` | FINANCE, ADMIN | Remittance batch detail view including rendered HTML of the batch document. |
-| GET | `/finance/remittance/{id}/835` | FINANCE, ADMIN | Streams the remittance batch as an X12 835 EDI file (`application/EDI-X12`). Content-Disposition triggers download as `remittance-{id}.835`. If `claims.remittance.edi.output.path` is configured, the file is also written to disk. |
+| GET | `/finance/remittance/{id}/835` | FINANCE, ADMIN | Streams the remittance batch as an X12 835 EDI file (`application/EDI-X12`). Content-Disposition triggers download as `remittance-{id}.835`. If `claims.remittance.edi.output.path` is configured, the file is also written to disk. If the paired payment batch was paid electronically (Phase 18), TRN02 carries the EFT reassociation number and BPR04 reads `ACH` instead of `CHK`. |
 | POST | `/finance/remittance/{id}/mark-sent` | FINANCE, ADMIN | Marks a remittance batch as sent. Redirects to `/finance/remittance/{id}`. |
 
 ### Payment Batches
@@ -174,8 +176,10 @@ All `/finance/**` routes require FINANCE or ADMIN role (enforced by `RoleFilter`
 | -------- | ------ | ------ | ------------- |
 | GET | `/finance/batches` | FINANCE, ADMIN | Lists all payment batches alongside pending payments. |
 | POST | `/finance/batches/create` | FINANCE, ADMIN | Creates a new payment batch from all currently pending payments. Required: `batchDate` (yyyy-MM-dd). Redirects to `/finance/batches/{id}`. |
-| GET | `/finance/batches/{id}` | FINANCE, ADMIN | Payment batch detail view. |
-| POST | `/finance/batches/{id}/export` | FINANCE, ADMIN | Exports the batch as CSV. Stores the CSV content as a flash attribute `csvContent`. Redirects to `/finance/batches/{id}`. |
+| GET | `/finance/batches/{id}` | FINANCE, ADMIN | Payment batch detail view. Shows EFT/ACH status (Phase 18) when at least one provider in the batch was paid electronically. |
+| POST | `/finance/batches/{id}/export` | FINANCE, ADMIN | Exports the batch as CSV. Stores the CSV content as a flash attribute `csvContent`. Also attempts EFT/ACH issuance (Phase 18) — see `EftPaymentService`. Redirects to `/finance/batches/{id}`. |
+| GET | `/finance/batches/{id}/ach` | FINANCE, ADMIN | Downloads the NACHA ACH file for this batch, regenerated on demand from the persisted TRN reassociation number and current provider banking data. 404 if no EFT payment exists for this batch (batch was entirely check-paid). |
+| POST | `/finance/batches/{id}/eft/settle` | FINANCE, ADMIN | Marks the batch's EFT payment as `SETTLED` (manual confirmation — no live bank feed). Redirects to `/finance/batches/{id}`. |
 
 ### Subrogation
 
@@ -310,7 +314,7 @@ All routes require ADMIN.
 | -------- | ------ | ------ | ------------- |
 | GET | `/admin/operations` | ADMIN | Operational dashboard: last 20 scheduled-job log entries and the list of manually triggerable jobs. |
 | POST | `/admin/operations/bulk-readjudicate` | ADMIN | Re-adjudicates all claims in a given status. Required: `status` (ClaimStatus value). Redirects to `/admin/operations` with count of reprocessed claims. |
-| POST | `/admin/operations/trigger-job` | ADMIN | Manually triggers a Quartz job by name. `jobName` must be one of: `slaEscalationJobDetail`, `staleClaimJobDetail`, `benefitYearRolloverJobDetail`, `appealSlaEscalationJobDetail`, `slowQueryReportJobDetail`, `claimArchiveJobDetail`, `inboundClaimFilePollerJobDetail`. Redirects to `/admin/operations`. |
+| POST | `/admin/operations/trigger-job` | ADMIN | Manually triggers a Quartz job by name. `jobName` must be one of: `slaEscalationJobDetail`, `staleClaimJobDetail`, `benefitYearRolloverJobDetail`, `appealSlaEscalationJobDetail`, `slowQueryReportJobDetail`, `claimArchiveJobDetail`, `inboundClaimFilePollerJobDetail`, `tradingPartnerPollerJobDetail`. Redirects to `/admin/operations`. |
 | GET | `/admin/operations/archive` | ADMIN | Searches the claim archive. Accepts `q` free-text param. Returns matching archived claims. |
 
 ---
@@ -322,6 +326,41 @@ Base path: `/admin/intake-batches` — Controller: `IntakeBatchController`
 | Method | Path | Role | Description |
 | -------- | ------ | ------ | ------------- |
 | GET | `/admin/intake-batches` | ADMIN | Read-only monitor of the batch claim intake ledger. Shows file name, status (COMPLETED/PARTIAL/FAILED), total/succeeded/quarantined counts, processed timestamp, and quarantine error notes. Accepts optional `limit` query param (default 50, max 200). |
+
+---
+
+## Admin — Enrollment Batches
+
+Base path: `/admin/enrollment-batches` — Controller: `EnrollmentBatchController`
+
+| Method | Path | Role | Description |
+| -------- | ------ | ------ | ------------- |
+| GET | `/admin/enrollment-batches` | ADMIN | Read-only monitor of the X12 834 enrollment file ledger (`enrollment_batches`, Phase 17). Same shape as Intake Batches: file name, status, total/succeeded/quarantined counts, processed timestamp, and quarantine error notes. Accepts optional `limit` query param (default 50, max 200). |
+
+---
+
+## Admin — Integrations
+
+Base path: `/admin/integrations` — Controller: `IntegrationController`
+
+| Method | Path | Role | Description |
+| -------- | ------ | ------ | ------------- |
+| GET | `/admin/integrations` | ADMIN | Read-only monitor of the EDI transaction log (`edi_transactions`) — every inbound 837 interchange and its outbound acknowledgments (999, 277CA, TA1), including which trading partner (if any) each row is attributed to. Accepts optional `limit` query param (default 50, max 200). |
+
+---
+
+## Admin — Trading Partners
+
+Base path: `/admin/trading-partners` — Controller: `TradingPartnerController`
+
+| Method | Path | Role | Description |
+| -------- | ------ | ------ | ------------- |
+| GET | `/admin/trading-partners` | ADMIN | Lists all trading partners (active and inactive) with their transport type and inbound path. |
+| GET | `/admin/trading-partners/new` | ADMIN | Renders the create-partner form. |
+| POST | `/admin/trading-partners/new` | ADMIN | Creates a partner. Required: `partnerName`, `isaQualifier`, `isaId`, `gsId`, `transportType` (`LOCAL`/`SFTP`), `inboundPath`. SFTP additionally requires `transportHost`, `transportUsername`, `transportCredentialRef` (a key name — the actual password is never entered here; it's set separately in the external prod overlay). Redirects to `/admin/trading-partners`. |
+| GET | `/admin/trading-partners/{id}/edit` | ADMIN | Renders the edit form pre-populated with the partner's data. |
+| POST | `/admin/trading-partners/{id}/edit` | ADMIN | Updates the partner. Same field set as create. Redirects to `/admin/trading-partners`. |
+| POST | `/admin/trading-partners/{id}/deactivate` | ADMIN | Deactivates the partner — `TradingPartnerPollerJob` stops polling it. Redirects to `/admin/trading-partners`. |
 
 ---
 
